@@ -1,0 +1,107 @@
+/* ===========================================================================
+   ADMIN PORTAL — a second portal behind the same sign-in.
+
+   The sign-in page asks which portal you want: the Adviser portal (clients,
+   Fact Find, LifePlan, reports) or the Admin portal, where the admin team's
+   tools live. The two share one login and one server; they do not share a
+   screen. Nothing from the Admin portal appears in the Adviser portal.
+
+   Tools register themselves with adminTool({...}) from their own part file,
+   so adding a tool is a new part file and nothing else: it gets a rail entry
+   and a card on the Admin home automatically. RWL Review (wrwl) is the first.
+   ========================================================================= */
+const ADMIN_TOOLS=[];
+function adminTool(t){ if(!ADMIN_TOOLS.some(x=>x.id===t.id)) ADMIN_TOOLS.push(t); }
+
+/* which portal: remembered in this browser, and #admin in the address bar */
+function portalGet(){ try{ return localStorage.getItem('sjb_portal')||'adviser'; }catch(e){ return 'adviser'; } }
+function portalSet(p){
+  S.portal=p;
+  try{ localStorage.setItem('sjb_portal',p); }catch(e){}
+  try{
+    if(p==='admin'){ if(location.hash!=='#admin') history.replaceState(null,'',location.pathname+'#admin'); }
+    else if(location.hash==='#admin') history.replaceState(null,'',location.pathname);
+  }catch(e){}
+}
+S.portal=(location.hash==='#admin')?'admin':portalGet();
+
+/* ------------------------------- the shell ------------------------------ */
+function adminRailHTML(){
+  return '<aside class="rail">'
+    +'<div class="rail-top"><div class="row">'+logo(24,1)+'</div>'
+    +'<div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(255,255,255,.45);font-weight:800;margin-top:9px">Admin Portal</div></div>'
+    +'<nav class="rail-nav">'
+    +'<button class="rail-item'+(S.screen==='adminHome'?' on':'')+'" data-a="adminHome">'+ic('sliders',16)+'<span>Home</span></button>'
+    +'<div class="rail-lbl">Tools</div>'
+    +ADMIN_TOOLS.map(t=>'<button class="rail-item'+(S.screen===t.id?' on':'')+'" data-a="'+esc(t.action)+'">'+ic(t.icon||'file',16)+'<span>'+esc(t.name)+'</span>'
+      +(t.count&&t.count()?'<span class="pc">'+t.count()+'</span>':'')+'</button>').join('')
+    +'</nav>'
+    +'<div class="rail-foot">'
+    +'<button class="btn sm blk" data-a="portal" data-v="adviser" style="background:rgba(255,255,255,.1);border-color:transparent;color:#fff">'+ic('swap',14)+' Switch to Adviser portal</button>'
+    +'<div class="tiny" style="color:rgba(255,255,255,.4);margin-top:10px;text-align:center">'+esc(AUTH_USER&&AUTH_USER.email||'')+'<br>build '+esc(BUILD)+'</div></div></aside>';
+}
+function adminTopHTML(){
+  return '<header class="top">'
+    +'<div class="row" style="gap:9px">'+logo(20)+'<span class="b8" style="font-size:14px">Admin Portal</span></div>'
+    +'<div class="sp row" style="gap:10px">'
+    +'<button class="btn sm ghost" data-a="fbOpen" title="Leave a note about this screen">'+ic('clip',15)+' Feedback</button>'
+    +'<button class="btn sm" data-a="logout">Sign out</button>'
+    +'</div></header>';
+}
+function screenAdminHome(){
+  let h='<div class="ph"><div><h1>Admin Portal</h1><div class="sub">Tools for the admin team. Each one is a card below and an entry in the rail.</div></div></div>';
+  h+='<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">';
+  ADMIN_TOOLS.forEach(t=>{
+    h+='<div class="card"><div class="card-b"><div class="row" style="gap:10px;margin-bottom:8px"><span class="av m or">'+ic(t.icon||'file',17)+'</span><h3 style="font-size:16px">'+esc(t.name)+'</h3></div>'
+      +'<p class="small muted" style="margin-bottom:14px;line-height:1.55">'+esc(t.desc||'')+'</p>'
+      +'<button class="btn pri" data-a="'+esc(t.action)+'">'+ic('chev',14)+' Open</button></div></div>';
+  });
+  if(!ADMIN_TOOLS.length) h+='<div class="card"><div class="empty"><h4>No tools yet</h4></div></div>';
+  h+='</div>';
+  return h;
+}
+const _renderAdm=render;
+render=function(){
+  if(S.portal==='admin'){
+    const tool=ADMIN_TOOLS.find(t=>t.id===S.screen);
+    const body=tool?tool.screen():screenAdminHome();
+    $('#root').innerHTML='<div class="shell">'+adminRailHTML()
+      +'<div class="main">'+adminTopHTML()+storageBanner()+'<div class="page">'+body+'</div></div></div>';
+    if(typeof CHAT_OPEN!=='undefined'&&CHAT_OPEN) chatRender();
+    return;
+  }
+  _renderAdm();
+};
+Object.assign(ACT,{
+  adminHome(){ S.screen='adminHome'; render(); window.scrollTo(0,0); },
+  portal(v){
+    portalSet(v==='admin'?'admin':'adviser');
+    S.screen=S.portal==='admin'?'adminHome':'clients'; S.q='';
+    render(); window.scrollTo(0,0);
+    const t=ADMIN_TOOLS.find(x=>x.id===S.screen); if(t&&t.onOpen) t.onOpen();
+  }
+});
+
+/* ------------------------------- sign-in -------------------------------- */
+/* The sign-in card gains the portal choice. The form itself is unchanged;
+   after a successful sign-in the render wrapper above sends the person to
+   whichever portal they picked. */
+const _showLoginAdm=showLogin;
+showLogin=function(msg){
+  _showLoginAdm(msg);
+  const f=$('#loginForm'); if(!f||$('#portalPick')) return;
+  const pick=document.createElement('div');
+  pick.className='field';
+  pick.innerHTML='<label class="lbl">Which portal?</label>'
+    +'<div class="row" style="gap:8px" id="portalPick">'
+    +'<button type="button" class="btn blk'+(S.portal!=='admin'?' dark':'')+'" data-pick="adviser">'+ic('users',14)+' Adviser portal</button>'
+    +'<button type="button" class="btn blk'+(S.portal==='admin'?' dark':'')+'" data-pick="admin">'+ic('shield',14)+' Admin portal</button></div>'
+    +'<div class="hint" id="portalHint">'+(S.portal==='admin'?'The admin team’s tools: RWL Review and the tools that follow.':'Clients, Fact Find, LifePlan and reports.')+'</div>';
+  f.parentNode.insertBefore(pick,f);
+  pick.addEventListener('click',e=>{
+    const b=e.target.closest('[data-pick]'); if(!b) return;
+    portalSet(b.dataset.pick);
+    pick.querySelectorAll('[data-pick]').forEach(x=>x.classList.toggle('dark',x.dataset.pick===S.portal));
+    $('#portalHint').textContent=S.portal==='admin'?'The admin team’s tools: RWL Review and the tools that follow.':'Clients, Fact Find, LifePlan and reports.';
+  });
+};

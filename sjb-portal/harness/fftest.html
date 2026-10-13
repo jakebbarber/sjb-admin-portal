@@ -1,0 +1,164 @@
+<!doctype html><meta charset="utf-8"><title>client fact find test</title>
+<script>
+/* The adviser feedback, item by item, plus the two things those changes could
+   have broken: adviser answers surviving a reply, and adviser answers never
+   reaching the client's file in the first place. */
+window.__runFF=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const NL=String.fromCharCode(10);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+
+    /* A client the adviser has already done work on. */
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-25',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={firstName:'Priya',surname:'Mistry',email:'p@example.com'};
+    c.data.estate={a1:{ihtUK:'Yes',will:'No'},a2:{}};
+    c.data.dcPensions=[
+      {_id:'p1',name:'Aviva',policyNo:'95768400',value:41000,
+       tvq:78799.84,tvqDate:'2026-06-01',amc:0.75,exitFee:'None after age 55',
+       crystallised:'No',dcReco:'Transfer to a new arrangement'},
+      {_id:'p2',name:'Scottish Widows',policyNo:'SW-9012',value:12500,tvq:12660}
+    ];
+    c.data.beneficiaries=[{_id:'b1',name:'Anil Mistry',share:100}];
+    c.data.bank=[{_id:'k1',bank:'Barclays',accountName:'P Mistry',iban:'GB00TEST00000000000000'}];
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+    const before0=JSON.parse(JSON.stringify(c.data));   /* the record untouched */
+
+    /* ---------- 1. what the client is actually shown ---------- */
+    say('--- the form that gets sent out ---');
+    const page=buildClientPage(c);
+    const secs=CLIENT_SECTION_IDS;
+    ok(secs.indexOf('beneficiaries')<0,'  Beneficiaries is off the Fact Find');
+    ok(secs.indexOf('bank')<0,'  Bank details is off the Fact Find');
+    ok(page.indexOf('GB00TEST')<0,'  and the bank account is not hidden in the file either');
+
+    const ctx=JSON.parse(page.slice(page.lastIndexOf('})(')+3,page.lastIndexOf(');')));
+    const secOf=id=>ctx.sections.find(s=>s.id===id);
+    const colIds=id=>(secOf(id).cols||[]).map(f=>f.id);
+    const pens=colIds('dcPensions');
+    say('    pension columns the client sees: '+pens.join(', '));
+    ['tvq','tvqDate','crystallised','nmpa','amc','exitFee','guarantees','type','valuedAt','employerContrib','personalContrib','notes']
+      .forEach(id=>ok(pens.indexOf(id)<0,'  "'+id+'" is not asked of the client'));
+    ok(!pens.some(id=>/reco|perf|spread|bid/i.test(id)),
+       '  none of the recommendation or performance questions are asked');
+    ok(JSON.stringify(pens)===JSON.stringify(['owner','name','policyNo','ccy','value']),
+       '  exactly five: '+pens.join(', '));
+    const db=colIds('dbPensions');
+    ['cetv','cetvDate','cetvExpiry','transferable','gmp','spouse']
+      .forEach(id=>ok(db.indexOf(id)<0,'  final salary "'+id+'" is ours to fill in'));
+    ok(colIds('properties').indexOf('monthly')<0,'  monthly cost is not asked twice on Property');
+    ok(colIds('liabilities').indexOf('monthly')<0,'  nor on Loans — spending is asked once');
+    const estF=secOf('estate').fields||[];
+    const est=estF.map(f=>f.id);
+    say('    estate questions, in order: '+est.join(', '));
+    ok(est.indexOf('ihtUK')<0&&est.indexOf('ihtLocal')<0,'  no inheritance tax position to answer');
+    const always=estF.filter(f=>!f.only);
+    say('    asked straight away: '+always.map(f=>f.label).join(' | '));
+    ok(always.length===3,'  the estate screen opens with three plain questions');
+    /* the follow-ups only appear once the answer calls for them */
+    const gate=(vals)=>estF.filter(f=>!f.only||f.only.is.indexOf(String(vals[f.only.f]||''))>=0).length;
+    ok(gate({})===3,'  with nothing answered, nothing else is shown');
+    ok(gate({will:'No',poa:'No',inheritance:'No'})===3,'  three Nos and the screen is done');
+    ok(gate({will:'Yes',poa:'No',inheritance:'No'})===6,'  saying yes to a will opens its three follow-ups');
+    ok(gate({will:'Yes',poa:'Yes',inheritance:'Yes'})===estF.length,'  all yeses shows everything');
+
+    const tin=(secOf('personal').fields||[]).find(f=>f.id==='tin');
+    ok(!!tin&&!tin.req,'  the tax ID number is no longer starred');
+    say('    its hint now reads: '+((tin||{}).hint||'—'));
+
+    /* nothing of ours travels in the seed data */
+    const seedP=ctx.data.dcPensions||[];
+    ok(seedP.length===2,'  both pensions are pre-filled for them');
+    ok(seedP.every(r=>r.tvq===undefined&&r.amc===undefined&&r.exitFee===undefined),
+       '  with our transfer values stripped out');
+    ok(page.indexOf('78799.84')<0,'  the transfer value appears nowhere in the file');
+    ok(((ctx.data.estate||{}).a1||{}).ihtUK===undefined,'  nor does the IHT position');
+
+    /* ---------- 2. the reply comes back ---------- */
+    say('--- their reply arrives ---');
+    const reply={ref:c.ref,at:new Date().toISOString(),data:{
+      personal:{a1:{firstName:'Priya',surname:'Mistry',tin:'',mobile:'07700 900123'}},
+      dcPensions:[
+        {name:'Aviva',policyNo:'95768400',value:43250},        /* value updated */
+        {name:'Royal London',policyNo:'RL-771',value:9000}      /* one we did not know about */
+      ],
+      estate:{a1:{will:'Yes'}}
+    }};
+    const sum=applyReply(getClient(c.id),reply);
+    say('    '+sum.join(' | '));
+    const cc=getClient(c.id);
+    const p=cc.data.dcPensions;
+    say('    pensions now: '+p.map(x=>x.name+' '+(x.value||'')+(x.tvq?' tvq '+x.tvq:'')).join(' / '));
+    ok(p.length===3,'  the new pension was added and the others kept');
+    const av=p.find(x=>x.policyNo==='95768400');
+    ok(!!av&&Number(av.value)===43250,'  their updated value came through');
+    ok(!!av&&Number(av.tvq)===78799.84,'  our transfer value survived');
+    ok(!!av&&av.exitFee==='None after age 55','  as did the exit fee');
+    ok(!!av&&av.dcReco==='Transfer to a new arrangement','  and the recommendation');
+    ok(!!p.find(x=>x.policyNo==='SW-9012'&&Number(x.tvq)===12660),
+       '  the pension they did not mention was left alone');
+    ok(cc.data.estate.a1.will==='Yes','  the will answer was taken');
+    ok(cc.data.estate.a1.ihtUK==='Yes','  our IHT note was not wiped by their reply');
+    ok((cc.data.beneficiaries||[]).length===1,'  beneficiaries are untouched in the portal');
+    ok((cc.data.bank||[])[0].iban==='GB00TEST00000000000000','  as are the bank details');
+    ok(cc.data.personal.a1.mobile==='07700 900123','  and plain answers still land');
+
+    /* a blank answer must not erase what we hold */
+    ok(cc.data.personal.a1.email==='p@example.com','  a blank field does not clear ours');
+
+    /* ---------- 3. the same again on the hosted link ---------- */
+    /* The emailed file and the link at /f/<token> are two separate code paths.
+       The link is the one the adviser was looking at, and it keeps its own copy
+       of the section list and the merge, in shared.js. */
+    say('--- the Fact Find link ---');
+    const SH=H.SJB_SHARED;
+    ok(SH.CLIENT_SECTION_IDS.indexOf('bank')<0&&SH.CLIENT_SECTION_IDS.indexOf('beneficiaries')<0,
+       '  the link asks for neither bank details nor beneficiaries');
+    /* a fresh record — `c` has already taken a reply by this point */
+    const rec={ref:'X1',data:JSON.parse(JSON.stringify(before0))};
+    const served=SH.clientSubsetData(rec);
+    ok(JSON.stringify(served).indexOf('78799.84')<0,'  the served page carries no transfer value');
+    ok(JSON.stringify(served).indexOf('GB00TEST')<0,'  and no bank account');
+    ok((served.dcPensions||[]).length===2,'  their pensions are still pre-filled');
+    const shCols=SH.clientFields(SH.sectionById('dcPensions').cols).map(f=>f.id);
+    ok(shCols.indexOf('tvq')<0&&shCols.indexOf('amc')<0,'  it asks exactly what the emailed form asks');
+
+    const sum2=SH.mergeSubmission(rec,{
+      dcPensions:[{name:'Aviva',policyNo:'95768400',value:44000}],
+      estate:{a1:{will:'Yes'}}});
+    say('    '+sum2.join(' | '));
+    const rp=rec.data.dcPensions;
+    const rav=rp.find(x=>x.policyNo==='95768400');
+    ok(rp.length===2,'  submitting one pension does not delete the other');
+    ok(!!rav&&String(rav.value)==='44000','  their figure came through');
+    ok(!!rav&&Number(rav.tvq)===78799.84,'  and our transfer value survived the submission');
+    ok(!!rav&&rav.dcReco==='Transfer to a new arrangement','  as did the recommendation');
+    ok(rec.data.estate.a1.ihtUK==='Yes','  our IHT note is still there');
+    ok((rec.data.bank||[]).length===1,'  and the bank details the link never saw');
+
+    /* ---------- 4. the adviser still sees everything ---------- */
+    say('--- the portal side is unchanged ---');
+    S.clientId=c.id; S.screen='client'; S.section='dcPensions'; render();
+    const txt=[...document.querySelectorAll('.page th')].map(t=>t.textContent).join(' | ');
+    ok(txt.indexOf('Transfer value')>=0&&txt.indexOf('Exit fee')>=0,'  the adviser still has the transfer value and exit fee columns');
+    ok(railHTML().indexOf('data-v="settings"')>=0,'  the rail is intact');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L.join(NL);
+};
+</script>

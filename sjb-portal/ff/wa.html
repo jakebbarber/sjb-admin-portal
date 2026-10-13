@@ -1,0 +1,96 @@
+/* ===========================================================================
+   ASSISTANT CHAT — a side panel the adviser can open anywhere in the portal.
+   It knows which client is open and answers from that record. Deliberately
+   plain: no streaming, no cleverness, just a conversation that keeps its
+   history for the session.
+   ========================================================================= */
+let CHAT=[], CHAT_OPEN=false, CHAT_BUSY=false;
+
+const chatCss=document.createElement('style');
+chatCss.textContent=
+ '.chatpanel{position:fixed;right:0;top:0;bottom:0;width:min(420px,100%);background:var(--card);'
++'border-left:1px solid var(--line);box-shadow:var(--sh-3);z-index:70;display:flex;flex-direction:column}'
++'.chathead{padding:14px 16px;border-bottom:1px solid var(--line-2);display:flex;align-items:center;gap:10px}'
++'.chatbody{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}'
++'.msg{max-width:88%;padding:10px 13px;border-radius:13px;font-size:13.5px;line-height:1.55;white-space:pre-wrap}'
++'.msg.me{align-self:flex-end;background:var(--charcoal);color:#fff;border-bottom-right-radius:4px}'
++'.msg.ai{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:4px}'
++'.msg.err{align-self:flex-start;background:var(--risk-t);color:var(--risk-ink);border:1px solid #EFD3CF}'
++'.chatfoot{border-top:1px solid var(--line-2);padding:12px;display:flex;gap:8px;align-items:flex-end}'
++'.chatfoot textarea{flex:1;resize:none;min-height:42px;max-height:130px}'
++'.chatsug{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 12px}'
++'@media(max-width:900px){.chatpanel{width:100%}}';
+document.head.appendChild(chatCss);
+
+const CHAT_SUGGESTIONS=[
+  'What is missing from this Fact Find?',
+  'Summarise this client in five lines',
+  'What does the cashflow say, in plain English?',
+  'What should I ask at the next meeting?'
+];
+function chatRender(){
+  let el=$('#chatPanel');
+  if(!CHAT_OPEN){ if(el) el.remove(); return; }
+  const c=getClient(S.clientId);
+  const html='<div class="chathead"><span style="color:var(--orange)">'+ic('sliders',18)+'</span>'
+    +'<div style="min-width:0"><div class="b8" style="font-size:14px">Assistant</div>'
+    +'<div class="tiny muted trunc">'+(c?esc(clientName(c))+' is open':'No client open')+'</div></div>'
+    +'<button class="x sp" data-a="chatClose" aria-label="Close">'+ic('x',15)+'</button></div>'
+    +'<div class="chatbody" id="chatBody">'
+    +(CHAT.length?CHAT.map(m=>'<div class="msg '+(m.role==='user'?'me':m.error?'err':'ai')+'">'+esc(m.content)+'</div>').join('')
+      :'<div class="msg ai">Ask me about this client, the Fact Find, or the cashflow. I can only see what is in the '
+       +'record — if something is missing I will say so rather than guess.</div>')
+    +(CHAT_BUSY?'<div class="msg ai muted">Thinking…</div>':'')
+    +'</div>'
+    +(CHAT.length?'':'<div class="chatsug">'+CHAT_SUGGESTIONS.map(s=>
+      '<button class="btn xs" data-a="chatSuggest" data-v="'+esc(s)+'">'+esc(s)+'</button>').join('')+'</div>')
+    +'<div class="chatfoot"><textarea class="ta" id="chatInput" placeholder="Ask something…" rows="1"></textarea>'
+    +'<button class="btn pri" data-a="chatSend"'+(CHAT_BUSY?' disabled':'')+'>'+ic('send',15)+'</button></div>';
+  if(!el){ el=document.createElement('aside'); el.className='chatpanel'; el.id='chatPanel'; document.body.appendChild(el); }
+  el.innerHTML=html;
+  const body=$('#chatBody'); if(body) body.scrollTop=body.scrollHeight;
+  const inp=$('#chatInput');
+  if(inp&&!CHAT_BUSY){
+    inp.focus();
+    inp.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); ACT.chatSend(); } });
+  }
+}
+async function chatSend(text){
+  if(CHAT_BUSY) return;
+  const msg=String(text||'').trim(); if(!msg) return;
+  CHAT.push({role:'user',content:msg});
+  CHAT_BUSY=true; chatRender();
+  try{
+    const c=getClient(S.clientId);
+    const r=await api('POST','/api/chat',{messages:CHAT.map(m=>({role:m.role,content:m.content})),
+      facts:c?aiFacts(c):''});
+    CHAT.push({role:'assistant',content:r.text||'(no answer)'});
+  }catch(e){
+    CHAT.push({role:'assistant',content:e.message||'The assistant could not be reached.',error:true});
+  }
+  CHAT_BUSY=false; chatRender();
+}
+Object.assign(ACT,{
+  chatOpen(){ CHAT_OPEN=true; chatRender(); },
+  chatClose(){ CHAT_OPEN=false; chatRender(); },
+  chatSend(){ const el=$('#chatInput'); if(el) chatSend(el.value); },
+  chatSuggest(v){ chatSend(v); }
+});
+/* a button in the top bar, on every screen */
+const _topHTMLA=topHTML;
+topHTML=function(){
+  return _topHTMLA().replace('<button class="btn sm" data-a="go" data-v="export">',
+    '<button class="btn sm" data-a="chatOpen" title="Ask the assistant">'+ic('sliders',15)+' Assistant</button>'
+    +'<button class="btn sm" data-a="go" data-v="export">');
+};
+const _renderA=render;
+render=function(){ _renderA(); if(CHAT_OPEN) chatRender(); };
+
+/* the cashflow screen keeps its client-report button */
+const _screenCashflowA=screenCashflow;
+screenCashflow=function(){
+  const h=_screenCashflowA();
+  return h.replace('<span class="tiny muted sp">',
+    '<button class="btn sm pri" data-a="cfReport">'+ic('file',14)+' Client report</button>'
+    +'<span class="tiny muted sp" style="margin-left:10px">');
+};

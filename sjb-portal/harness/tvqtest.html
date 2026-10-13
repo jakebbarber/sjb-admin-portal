@@ -1,0 +1,64 @@
+<!doctype html><meta charset="utf-8"><title>real TVQ test</title>
+<script>
+/* Runs against the adviser's own ReAssure TVQ — a scanned PDF, and the text
+   Windows OCR got out of it. Nothing from it is stored anywhere. */
+window.__runTvq=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  try{
+    const ORIG=window.fetch.bind(window);
+    /* ---------- 1. the scanned PDF itself ---------- */
+    const pdf=new File([await (await ORIG('/tvq_real.pdf')).blob()],'TVQ June 2026 (8).pdf');
+    const d1=await readDocument(pdf);
+    say('scanned PDF: kind='+d1.kind+' lines='+(d1.lines||[]).length+' images='+d1.images+' scanned='+d1.scanned);
+    ok(d1.scanned===true,'recognised as a scan rather than failing silently');
+    ok((d1.lines||[]).length===0,'no text found — because there is none in the file');
+    const f1=extractScheme(d1);
+    ok(Object.keys(f1).length===0,'nothing invented from a scan');
+
+    /* ---------- 2. the same document after OCR ---------- */
+    const txt=new File([await (await ORIG('/tvq_ocr.txt')).blob()],'TVQ June 2026 (8).txt');
+    const d2=await readDocument(txt);
+    say('after OCR: kind='+d2.kind+' lines='+(d2.lines||[]).length);
+    const f2=extractScheme(d2);
+    say('fields found = '+Object.keys(f2).length+' / '+SCHEME_FIELDS.length);
+    SCHEME_FIELDS.forEach(fd=>{
+      const g=f2[fd.id];
+      say('  '+fd.label.padEnd(44).slice(0,44)+' '+(g?JSON.stringify(String(g.value).slice(0,58))+'   ['+g.where+']':'—'));
+    });
+    /* the ones that matter for an application */
+    ok(f2.policyNo&&String(f2.policyNo.value)==='95768400','policy number read off the scan');
+    ok(f2.value&&Math.abs(f2.value.value-33671.29)<0.01,'value read as 33671.29 despite OCR turning £ into E');
+    ok(f2.name&&/COPPS/.test(f2.name.value),'the plan type was read');
+    ok(f2.guarantees&&/no guarantees/i.test(f2.guarantees.value),'the guarantees answer was read');
+    /* This letter is ReAssure's own policy-information format, not the
+       network's questionnaire, so most of the other questions simply are not
+       answered in it. What matters is that nothing was invented for them. */
+    ok(!f2.tvq&&!f2.retOptionsUK&&!f2.deathUK&&!f2.crystallised&&!f2.amc,
+       'the questions this letter does not answer were left empty, not guessed');
+    ok(Object.keys(f2).length===4,'exactly the four facts the letter states ('+Object.keys(f2).join(', ')+')');
+
+    /* ---------- 3. the column-pairing behaviour in isolation ---------- */
+    const block=new File([new Blob([
+      'Basic policy information\n'+
+      'Policyholder name\nPolicy number\nType of policy\nRetirement date\nGuarantees\n'+
+      'A N Other\nZZ-99887\nPersonal Pension\n8 May 2031\nThis policy has no guarantees\n'])],'block.txt');
+    const d3=await readDocument(block);
+    const f3=extractScheme(d3);
+    ok(f3.policyNo&&f3.policyNo.value==='ZZ-99887','labels-then-values block: policy number paired correctly');
+    ok(f3.name&&/Personal Pension/.test(f3.name.value),'labels-then-values block: scheme name paired correctly');
+    ok(/paired by position/.test((f3.policyNo||{}).where||''),'and it says the pairing was positional');
+
+    /* ---------- 4. it must not wreck the ordinary layouts ---------- */
+    for(const n of ['sample_loa.docx','loa_prudential.docx']){
+      const f=new File([await (await ORIG('/'+n)).blob()],n);
+      const dd=await readDocument(f);
+      const ff=extractScheme(dd);
+      say('regression '+n+': '+Object.keys(ff).length+' fields, policyNo='+JSON.stringify((ff.policyNo||{}).value)
+        +', amc='+JSON.stringify((ff.amc||{}).value));
+      ok(Object.keys(ff).length>=19,'  '+n+' still yields 19+');
+    }
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

@@ -1,0 +1,686 @@
+/* ============================== SEND A LINK ============================== */
+function sendModal(){
+  const c=getClient(S.clientId); if(!c) return;
+  const kind=S.flow.kind, k=SEND_KINDS[kind];
+  const to=S.flow.to!==undefined?S.flow.to:primaryEmail(c);
+  const body=S.flow.body!==undefined?S.flow.body:sendBody(c,kind);
+  const subj=S.flow.subject!==undefined?S.flow.subject:k.subject(c);
+  let h=mHead('Send the '+k.name.toLowerCase(),'Opens a draft in your own email program. Nothing is sent by this page.');
+  h+='<div class="m-b">';
+  /* Only the Fact Find is real today — the rest need a hosted portal behind
+     them, so they stay visible but cannot be sent to a client. */
+  h+='<div class="row wrapf mb-s" style="gap:6px">'
+    +Object.keys(SEND_KINDS).map(x=>{ const live=!!SEND_KINDS[x].attach;
+      return '<button class="btn xs'+(x===kind?' dark':'')+'"'+(live?' data-a="sendKind" data-v="'+x+'"':' disabled title="Needs the hosted portal — not available yet"')
+        +'>'+esc(SEND_KINDS[x].name)+(live?'':' · soon')+'</button>'; }).join('')+'</div>';
+  if(!primaryEmail(c)) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span>'
+    +'<div>No email is recorded for this client yet. Type one below, or add it in <b>Personal details</b>.</div></div>';
+  h+='<div class="field"><label class="lbl">To</label><input class="inp" data-f="to" value="'+esc(to)+'"></div>';
+  h+='<div class="field"><label class="lbl">Subject</label><input class="inp" data-f="subject" value="'+esc(subj)+'"></div>';
+  if(k.attach){
+    h+='<div class="note info mb"><span class="ic">'+ic('info',15)+'</span><div><b>This one travels as an '
+      +'attachment.</b> Press “Download the form” below, then attach the downloaded file to the email before '
+      +'you send it. The form is personalised to '+esc(clientName(c))+' and their answers come back to you by email.</div></div>';
+  } else {
+    h+='<div class="field"><label class="lbl">The link</label>'
+      +'<div class="row" style="gap:7px"><input class="inp mono" readonly value="'+esc(sendLink(c,kind))+'">'
+      +'<button class="btn sm" data-a="copyLink">'+ic('copy',14)+'</button></div>'
+      +'<div class="hint">Set the base address under Settings so this points at your real portal.</div></div>';
+  }
+  h+='<div class="field"><label class="lbl">Message</label>'
+    +'<textarea class="ta" data-f="body" rows="12" style="font-size:13px">'+esc(body)+'</textarea></div>';
+  const prev=DB.sends.filter(x=>x.clientId===c.id&&x.kind===kind);
+  if(prev.length) h+='<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>Last sent '
+    +esc(fdt(prev[0].at))+' to '+esc(prev[0].to||'—')+'.</div></div>';
+  h+='</div>';
+  h+='<div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +(kind==='factfind'?'<button class="btn" data-a="formDownload">'+ic('dl',14)+' Download the form</button>':'')
+    +'<button class="btn" data-a="sendCopy">'+ic('copy',14)+' Copy message</button>'
+    +'<button class="btn pri" data-a="sendGo">'+ic('mail',14)+' Open in email</button></div>';
+  openModal(h);
+}
+
+/* =========================== WORK REQUEST FLOW =========================== */
+function wrModal(){
+  const fl=S.flow;
+  if(fl.step==='client') return wrClientStep();
+  if(fl.step==='type') return wrTypeStep();
+  return wrFormStep();
+}
+function wrClientStep(){
+  let h=mHead('Raise a work request','Which client is this for?');
+  h+='<div class="m-b">';
+  if(!DB.clients.length) h+='<div class="empty"><h4>No clients yet</h4><p>Add a client first.</p></div>';
+  else h+='<div class="stack">'+DB.clients.slice().sort((a,b)=>(b.updated||'').localeCompare(a.updated||''))
+    .map(c=>'<button class="btn blk" style="justify-content:flex-start;padding:11px 13px" data-a="wrClient" data-v="'+c.id+'">'
+      +'<span class="av s">'+esc(initials(clientName(c)))+'</span>'
+      +'<span style="text-align:left;min-width:0"><span class="b7 trunc" style="display:block">'+esc(clientName(c))+'</span>'
+      +'<span class="tiny muted mono">'+esc(c.ref)+'</span></span></button>').join('')+'</div>';
+  h+='</div><div class="m-f"><button class="btn" data-a="close">Cancel</button></div>';
+  openModal(h);
+}
+function wrTypeStep(){
+  const c=getClient(S.flow.clientId);
+  let h=mHead('What do you need?',clientName(c)+' · '+c.ref);
+  h+='<div class="m-b"><div class="stack">';
+  const byTeam=grp(WR_TYPES,t=>t.team);
+  Object.keys(byTeam).forEach(team=>{
+    h+='<div class="label" style="margin-top:4px">'+esc(team)+'</div>';
+    byTeam[team].forEach(t=>{
+      const gaps=(t.needs||[]).map(id=>sectionStats(c,sectionById(id))).filter(x=>x.pct<100).length;
+      h+='<button class="btn blk" style="justify-content:flex-start;padding:11px 13px;text-align:left" '
+        +'data-a="wrType" data-v="'+t.id+'"><span style="flex:1;min-width:0">'
+        +'<span class="b7" style="display:block">'+esc(t.name)+'</span>'
+        +(t.desc?'<span class="tiny muted" style="display:block;white-space:normal;font-weight:500">'+esc(t.desc)+'</span>':'')
+        +'</span>'+(gaps?'<span class="bdg warn">'+gaps+' section'+(gaps===1?'':'s')+' incomplete</span>':'')
+        +'</button>';
+    });
+  });
+  h+='</div></div><div class="m-f"><button class="btn" data-a="close">Cancel</button></div>';
+  openModal(h,1);
+}
+function wrFormStep(){
+  const c=getClient(S.flow.clientId), t=wrType(S.flow.type), v=S.flow.fields;
+  let h=mHead(t.name,clientName(c)+' · '+c.ref+' · goes to '+(v.team||t.team));
+  h+='<div class="m-b">';
+  const gaps=(t.needs||[]).map(id=>({s:sectionById(id),st:sectionStats(c,sectionById(id))})).filter(x=>x.st.pct<100);
+  if(gaps.length) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span>'
+    +'<div><b>Incomplete for this request type:</b> '+gaps.map(g=>esc(g.s.name)+' ('+g.st.pct+'%)').join(', ')
+    +'. You can still raise it — the gaps are flagged in the email so admin know what is coming.</div></div>';
+  h+=fieldsGrid(t.fields,v,'FLOW|_');
+  h+='</div>';
+  h+='<div class="m-f"><button class="btn" data-a="wrBack">'+ic('chevL',14)+' Back</button>'
+    +'<button class="btn" data-a="wrPreview">Preview email</button>'
+    +'<button class="btn pri" data-a="wrSave">'+ic('check',14)+' Raise request</button></div>';
+  openModal(h);
+}
+function wrViewModal(id){
+  const r=DB.requests.find(x=>x.id===id); if(!r) return;
+  const c=getClient(r.clientId); if(!c) return toast('Client deleted','The client this belongs to is gone.','warn');
+  const body=wrBody(c,r);
+  let h=mHead(wrType(r.type).name,r.ref+' · '+clientName(c));
+  h+='<div class="m-b">'
+    +'<div class="row wrapf mb-s" style="gap:8px">'
+    +'<span class="bdg '+(r.status==='Complete'?'ok':r.status==='Sent'?'info':'warn')+'"><span class="dot"></span>'
+    +esc(r.status)+'</span>'
+    +'<span class="small muted">Raised '+esc(fdt(r.created))+(r.sentAt?' · emailed '+esc(fdt(r.sentAt)):'')+'</span></div>'
+    +'<div class="label mb-s" style="margin-top:12px">Email that will be sent</div>'
+    +'<div class="small muted mb-s"><b>To:</b> '+esc(DB.settings.adminEmail||CFG.adminEmail)
+    +' &nbsp;<b>Subject:</b> '+esc(wrSubject(c,r))+'</div>'
+    +'<div class="pre">'+esc(body)+'</div></div>'
+    +'<div class="m-f"><button class="btn" data-a="close">Close</button>'
+    +'<button class="btn" data-a="wrCopy" data-v="'+r.id+'">'+ic('copy',14)+' Copy</button>'
+    +'<button class="btn pri" data-a="wrSend" data-v="'+r.id+'">'+ic('mail',14)+' Open in email</button></div>';
+  openModal(h,1);
+}
+
+/* ============================ OTHER MODALS ============================== */
+function missingModal(){
+  const c=getClient(S.clientId), miss=missingFor(c);
+  let h=mHead('Outstanding for '+clientName(c),miss.length?miss.length+' required field'+(miss.length===1?'':'s')+' still to capture':'Nothing outstanding');
+  h+='<div class="m-b">';
+  if(!miss.length) h+='<div class="note ok"><span class="ic">'+ic('checkc',15)+'</span>'
+    +'<div>Every required field is filled in. Optional detail may still be worth adding before you write advice.</div></div>';
+  else{
+    const by=grp(miss,m=>m.sec);
+    h+='<div class="stack">'+Object.keys(by).map(sec=>{
+      const s=sectionById(sec);
+      return '<div style="border:1px solid var(--line);border-radius:11px;padding:12px 13px">'
+        +'<div class="row"><span style="color:var(--blue)">'+ic(s.icon,15)+'</span>'
+        +'<span class="b7">'+esc(s.name)+'</span>'
+        +'<button class="btn xs sp" data-a="sectClose" data-v="'+sec+'">Go there '+ic('chev',12)+'</button></div>'
+        +'<div class="tiny muted" style="margin-top:7px;line-height:1.7">'
+        +by[sec].map(m=>'· '+esc(m.field)).join('<br>')+'</div></div>';
+    }).join('')+'</div>';
+  }
+  h+='</div><div class="m-f"><button class="btn pri" data-a="close">Close</button></div>';
+  openModal(h);
+}
+function restoreModal(){
+  let h=mHead('Restore from a backup','Paste the contents of a backup file, or choose the file.');
+  h+='<div class="m-b">'
+    +'<input type="file" accept=".json,application/json" id="rfile" class="inp mb">'
+    +'<div class="field"><label class="lbl">…or paste the JSON</label>'
+    +'<textarea class="ta mono" id="rtext" rows="7" placeholder=\'{"app":"SJB Fact Find", ...\'></textarea></div>'
+    +'<div class="note warn"><span class="ic">'+ic('alert',15)+'</span><div><b>Merge</b> keeps what you have and adds '
+    +'anything missing. <b>Replace</b> discards every client currently in this browser.</div></div></div>'
+    +'<div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn danger" data-a="restoreGo" data-v="replace">Replace everything</button>'
+    +'<button class="btn pri" data-a="restoreGo" data-v="merge">Merge</button></div>';
+  openModal(h);
+  const fi=$('#rfile');
+  if(fi) fi.addEventListener('change',e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const rd=new FileReader();
+    rd.onload=()=>{ const ta=$('#rtext'); if(ta) ta.value=rd.result; toast('File loaded','Now choose Merge or Replace.'); };
+    rd.readAsText(f);
+  });
+}
+/* ----------------------------- email handoff ---------------------------- */
+/* Shown only on the published page, where opening Outlook is blocked by the
+   sandbox. Everything is one copy button away from a pasted email. */
+let HANDOFF=null;
+function emailHandoff(to,subject,body,cc){
+  HANDOFF={to:to||'',subject:subject||'',body:body||'',cc:cc||''};
+  let h=mHead('Your email is ready to paste',
+    'This page is not allowed to open your email program — that is a claude.ai restriction, not a fault. '
+    +'Copy the parts into a new Outlook email, or use the desktop copy where the draft opens itself.');
+  h+='<div class="m-b">'
+    +'<div class="field"><label class="lbl">To</label><div class="row" style="gap:7px">'
+    +'<input class="inp" readonly value="'+esc(HANDOFF.to)+'">'
+    +'<button class="btn sm" data-a="hCopy" data-v="to">'+ic('copy',14)+'</button></div></div>'
+    +(HANDOFF.cc?'<div class="field"><label class="lbl">Cc</label><div class="row" style="gap:7px">'
+      +'<input class="inp" readonly value="'+esc(HANDOFF.cc)+'">'
+      +'<button class="btn sm" data-a="hCopy" data-v="cc">'+ic('copy',14)+'</button></div></div>':'')
+    +'<div class="field"><label class="lbl">Subject</label><div class="row" style="gap:7px">'
+    +'<input class="inp" readonly value="'+esc(HANDOFF.subject)+'">'
+    +'<button class="btn sm" data-a="hCopy" data-v="subject">'+ic('copy',14)+'</button></div></div>'
+    +'<div class="field"><label class="lbl">Message</label>'
+    +'<textarea class="ta" readonly rows="9" style="font-size:13px">'+esc(HANDOFF.body)+'</textarea></div>'
+    +'<div class="note mut"><span class="ic">'+ic('info',15)+'</span><div>From the file on your desktop '
+    +'(<b>'+esc(CFG.localFile)+'</b>) this whole step is one click — the draft opens in Outlook with everything '
+    +'filled in.</div></div>'
+    +'</div>'
+    +'<div class="m-f"><button class="btn" data-a="close">Close</button>'
+    +'<button class="btn" data-a="hCopy" data-v="body">'+ic('copy',14)+' Copy message</button>'
+    +'<button class="btn pri" data-a="hCopy" data-v="all">'+ic('copy',14)+' Copy everything</button></div>';
+  openModal(h);
+}
+
+/* ----------------------- new client quick send -------------------------- */
+function quickSendModal(){
+  const v=S.flow||{};
+  let h=mHead('Send a Fact Find to a new client','Name and email — the record is created and the form goes out in one step.');
+  h+='<div class="m-b">'
+    +'<div class="grid g2">'
+    +'<div class="field"><label class="lbl">First name <span class="req">*</span></label>'
+    +'<input class="inp" data-f="qsFirst" value="'+esc(v.qsFirst||'')+'"></div>'
+    +'<div class="field"><label class="lbl">Surname <span class="req">*</span></label>'
+    +'<input class="inp" data-f="qsSurname" value="'+esc(v.qsSurname||'')+'"></div>'
+    +'</div>'
+    +'<div class="field"><label class="lbl">Email address <span class="req">*</span></label>'
+    +'<input class="inp" type="email" data-f="qsEmail" value="'+esc(v.qsEmail||'')+'"></div>'
+    +'<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>What happens: their personalised '
+    +'Fact Find form downloads, and a draft email opens from your own SJB account with the message ready. '
+    +'<b>Attach the downloaded form</b> and press send. When they finish, their answers arrive back in your '
+    +'inbox — paste them in with <b>Import client reply</b> and the record fills itself.</div></div>'
+    +'</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn pri" data-a="quickSendGo">'+ic('send',14)+' Create &amp; send</button></div>';
+  openModal(h);
+}
+/* --------------------------- import a reply ----------------------------- */
+function importModal(){
+  const c=getClient(S.clientId);
+  const res=S.flow&&S.flow.importResult;
+  let h=mHead('Import client reply',c?('For '+clientName(c)):'Paste the code from the client’s email.');
+  h+='<div class="m-b">';
+  if(res){
+    h+='<div class="note ok"><span class="ic">'+ic('checkc',15)+'</span><div><b>Imported.</b> '
+      +(res.length?res.map(esc).join(' · '):'No new answers found — everything matched what was already on file.')
+      +'</div></div>';
+  } else {
+    h+='<div class="field"><label class="lbl">Paste the whole reply block from the email</label>'
+      +'<textarea class="ta mono" id="replyText" rows="8" placeholder="--- FACT FIND REPLY — do not edit below this line ---&#10;SJB1.…"></textarea></div>'
+      +'<div class="row" style="gap:8px"><input type="file" id="replyFile" accept=".txt" class="inp" style="flex:1"></div>'
+      +'<div class="hint mt-s">Either paste the code, or choose the .txt file if the client saved one instead.</div>'
+      +(S.flow&&S.flow.importWarn?'<div class="note warn mt"><span class="ic">'+ic('alert',15)+'</span><div>'
+        +esc(S.flow.importWarn)+' Press Import again to apply it anyway.</div></div>':'');
+  }
+  h+='</div><div class="m-f"><button class="btn" data-a="close">'+(res?'Done':'Cancel')+'</button>'
+    +(res?'':'<button class="btn pri" data-a="importGo">'+ic('up',14)+' Import</button>')+'</div>';
+  openModal(h);
+  const fi=$('#replyFile');
+  if(fi) fi.addEventListener('change',e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const rd=new FileReader();
+    rd.onload=()=>{ const ta=$('#replyText'); if(ta) ta.value=rd.result; };
+    rd.readAsText(f);
+  });
+}
+/* ---------------------------- build a MADS ------------------------------ */
+function madsModal(){
+  const c=getClient(S.clientId);
+  const canZip=typeof CompressionStream==='function'&&typeof DecompressionStream==='function';
+  const r=S.flow&&S.flow.result;
+  let h=mHead('Create the MADS','Fills your blank MADS with this client and gives you the workbook back.');
+  h+='<div class="m-b">';
+  if(!canZip){
+    h+='<div class="note warn"><span class="ic">'+ic('alert',15)+'</span><div>This browser cannot build a workbook. '
+      +'Use Edge or Chrome, or fall back to the MADS CSV.</div></div>';
+  } else if(r){
+    h+='<div class="note ok"><span class="ic">'+ic('checkc',15)+'</span><div><b>'+r.written+' cells written</b> across '
+      +esc(r.touched.join(', '))+'.'+(r.skipped?' '+r.skipped+' left alone because the workbook calculates them.':'')
+      +(r.mapInfo&&r.mapInfo.source==='workbook'
+        ?' Cell positions were read from this workbook’s own Template sheet ('+r.mapInfo.count+' fields), so they match this version.'
+        :' <b>Could not read this workbook’s Template sheet</b> — the built-in 3.26 layout was used; check a few cells.')
+      +'</div></div>';
+    if(r.missing.length) h+='<div class="note warn mt"><span class="ic">'+ic('alert',15)+'</span>'
+      +'<div>Sheets not found in your file: <b>'+esc(r.missing.join(', '))+'</b>. Those fields were not written.</div></div>';
+    h+='<div class="note info mt"><span class="ic">'+ic('info',15)+'</span><div>Open it and check a few values against '
+      +'the Fact Find before you rely on it. Excel may warn that the file came from the internet — the macros are '
+      +'untouched, but you will need to allow them.</div></div>';
+  } else {
+    /* The published page runs sandboxed and cannot hand over a .xlsm; the copy
+       on your desktop can. Say so before they spend time picking a file. */
+    if(window.claude) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span>'
+      +'<div><b>Not from this page.</b> A published page is not allowed to save a workbook. '
+      +'Open <b>sjb-factfind.html</b> from your desktop and build the MADS there — same tool, same data entry, '
+      +'but the download works.</div></div>';
+    h+='<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>Choose a <b>blank MADS</b> — your own '
+      +'file, whichever version you are on. Values go into the cells the workbook reads from, so the Template sheet '
+      +'and every currency conversion calculate themselves. Cells holding formulas are never overwritten.</div></div>';
+    h+='<div class="field mt"><label class="lbl">Your blank MADS (.xlsm)</label>'
+      +'<input type="file" id="madsFile" class="inp" accept=".xlsm,.xlsx"></div>';
+    h+='<div class="kv"><span class="k">Client</span><span class="v">'+esc(clientName(c))+'</span></div>'
+      +'<div class="kv"><span class="k">Fields captured</span><span class="v">'+madsFilled(c)+'</span></div>'
+      +'<div class="kv"><span class="k">Fact Find complete</span><span class="v">'+overall(c)+'%</span></div>';
+    h+='<div class="note warn mt"><span class="ic">'+ic('alert',15)+'</span><div>Pick a <b>blank</b> one. If you '
+      +'choose a MADS that already has a client in it, anything this Fact Find covers is overwritten.</div></div>';
+  }
+  h+='</div><div class="m-f"><button class="btn" data-a="close">Close</button>'
+    +(r?'<button class="btn pri" data-a="madsSave">'+ic('dl',14)+' Save the workbook</button>'
+       :'<button class="btn pri" data-a="madsGo"'+(canZip?'':' disabled')+'>'+ic('swap',14)+' Build it</button>')
+    +'</div>';
+  openModal(h);
+}
+function confirmModal(title,msg,label,act,val){
+  openModal(mHead(title)+'<div class="m-b"><p style="line-height:1.65">'+esc(msg)+'</p></div>'
+    +'<div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn danger" data-a="'+act+'"'+(val?' data-v="'+esc(val)+'"':'')+'>'+esc(label)+'</button></div>');
+}
+
+/* ============================ INPUT HANDLING ============================ */
+/* One delegated listener writes straight into the model. No re-render, so the
+   caret and scroll position survive. */
+function writePath(path,value){
+  const p=path.split('|');
+  if(p[0]==='ROW'){
+    const c=getClient(S.clientId); if(!c) return;
+    const row=(c.data[p[1]]||[]).find(r=>r._id===p[2]); if(!row) return;
+    row[p[3]]=value; touch(c); return 'client';
+  }
+  if(p[0]==='SET'){ DB.settings[p[2]]=value; save(); return 'settings'; }
+  if(p[0]==='FLOW'){ if(S.flow) S.flow.fields[p[2]]=value; return 'flow'; }
+  const c=getClient(S.clientId); if(!c) return;
+  const sec=p[0], who=p[1], fid=p[2];
+  if(who==='_'){ c.data[sec]=c.data[sec]||{}; c.data[sec][fid]=value; }
+  else { c.data[sec]=c.data[sec]||{a1:{},a2:{}}; c.data[sec][who]=c.data[sec][who]||{}; c.data[sec][who][fid]=value; }
+  touch(c);
+  return 'client';
+}
+/* Keeps the progress read-outs honest without redrawing the form. */
+function refreshProgress(){
+  const c=getClient(S.clientId); if(!c||S.screen!=='client') return;
+  $$('.sect-btn').forEach(b=>{
+    const s=sectionById(b.dataset.v); if(!s) return;
+    const st=sectionStats(c,s), pc=b.querySelector('.pc'); if(!pc) return;
+    pc.textContent=st.pct>=100?'✓':st.pct+'%';
+    pc.style.color=st.pct>=100?'var(--ok)':st.pct>0?'var(--warn)':'var(--ink-4)';
+  });
+}
+let PROG_T=null;
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(el.dataset&&el.dataset.p){
+    writePath(el.dataset.p,el.value);
+    clearTimeout(PROG_T); PROG_T=setTimeout(refreshProgress,400);
+    return;
+  }
+  if(el.dataset&&el.dataset.f&&S.flow){ S.flow[el.dataset.f]=el.value; return; }
+  if(el.id==='q'){ S.q=el.value; clearTimeout(PROG_T);
+    PROG_T=setTimeout(()=>{ const pos=el.selectionStart; render();
+      const n=$('#q'); if(n){ n.focus(); try{n.setSelectionRange(pos,pos);}catch(_){} } },220); }
+});
+document.addEventListener('change',e=>{
+  const el=e.target;
+  if(el.dataset&&el.dataset.p){
+    writePath(el.dataset.p,el.value);
+    refreshProgress();
+    /* Names and the second applicant change the page around them. */
+    const p=el.dataset.p.split('|');
+    if(p[0]==='personal'&&['firstName','surname','title'].includes(p[2])) render();
+    return;
+  }
+  if(el.dataset&&el.dataset.a==='status'){
+    const c=getClient(S.clientId); if(c){ c.status=el.value; save(); toast('Status updated',el.value); }
+  }
+});
+
+/* ============================== ACTIONS ================================= */
+const ACT={
+  go(v){ S.screen=v; S.q=''; render(); window.scrollTo(0,0); },
+  open(v){ S.clientId=v; S.screen='client'; S.section='meta'; S.applicant='a1'; render(); window.scrollTo(0,0); },
+  sect(v){ S.section=v; render(); window.scrollTo(0,0); },
+  sectClose(v){ closeModal(); S.flow=null; S.section=v; render(); window.scrollTo(0,0); },
+  applicant(v,el){ S.applicant=el.dataset.k; render(); },
+  close(){ dismissModal(); },
+
+  newClient(){
+    const c=blankClient();
+    DB.clients.unshift(c); save(true);
+    S.clientId=c.id; S.screen='client'; S.section='personal'; S.applicant='a1';
+    render(); window.scrollTo(0,0);
+    toast('Client created',c.ref+' — start with the name and date of birth.');
+  },
+  delClient(){
+    const c=getClient(S.clientId); if(!c) return;
+    confirmModal('Delete '+clientName(c)+'?',
+      'This removes the whole Fact Find and cannot be undone. Any work requests raised for them will remain, '
+      +'but will no longer be linked to a client. Take a backup first if you are unsure.',
+      'Delete permanently','delClientGo');
+  },
+  delClientGo(){
+    const i=DB.clients.findIndex(c=>c.id===S.clientId);
+    if(i>-1){ const n=clientName(DB.clients[i]); DB.clients.splice(i,1); save(true);
+      dismissModal(); S.screen='clients'; S.clientId=null; render(); toast('Deleted',n+' has been removed.','warn'); }
+  },
+
+  rowAdd(v,el){
+    const c=getClient(S.clientId), s=sectionById(el.dataset.s);
+    const row={_id:uid('r')};
+    /* Sensible defaults so you are not re-picking the obvious every time. */
+    s.cols.forEach(col=>{
+      if(col.id==='ccy') row.ccy=c.data.meta.ffCurrency||'GBP';
+      if(col.id==='owner') row.owner=hasApplicant2(c)?'':'Applicant 1';
+      if(col.def) row[col.id]=col.def;
+    });
+    c.data[s.id]=c.data[s.id]||[]; c.data[s.id].push(row);
+    if(c.declared) delete c.declared[s.id];
+    touch(c); render();
+    setTimeout(()=>{ const inp=$$('[data-p^="ROW|'+s.id+'|'+row._id+'|"]')[1]||$$('[data-p^="ROW|'+s.id+'|'+row._id+'|"]')[0];
+      if(inp) inp.focus(); },30);
+  },
+  rowDel(v,el){
+    const c=getClient(S.clientId), sid=el.dataset.s, rid=el.dataset.r;
+    c.data[sid]=(c.data[sid]||[]).filter(r=>r._id!==rid);
+    touch(c); render();
+  },
+  declareNone(v,el){
+    const c=getClient(S.clientId), sid=el.dataset.s;
+    c.declared=c.declared||{};
+    if(c.declared[sid]) delete c.declared[sid]; else c.declared[sid]=true;
+    touch(c); render();
+  },
+  missing(){ missingModal(); },
+
+  /* --- sending links --- */
+  sendOpen(){ S.flow={mode:'send',kind:'factfind'}; sendModal(); },
+  sendKind(v){ S.flow={mode:'send',kind:v}; sendModal(); },
+  copyLink(){ const c=getClient(S.clientId); copyText(sendLink(c,S.flow.kind),'The link'); },
+  sendCopy(){
+    const c=getClient(S.clientId);
+    const b=S.flow.body!==undefined?S.flow.body:sendBody(c,S.flow.kind);
+    copyText(b,'The message'); logSend(c,S.flow.kind,'copied');
+  },
+  sendGo(){
+    const c=getClient(S.clientId), k=SEND_KINDS[S.flow.kind];
+    const to=S.flow.to!==undefined?S.flow.to:primaryEmail(c);
+    if(!to){ toast('No email address','Type the client’s email address first.','warn'); return; }
+    const subj=S.flow.subject!==undefined?S.flow.subject:k.subject(c);
+    const body=S.flow.body!==undefined?S.flow.body:sendBody(c,S.flow.kind);
+    logSend(c,S.flow.kind,'email');
+    if(S.flow.kind==='factfind'&&c.status==='Fact Find in progress'){ c.status='Awaiting client'; save(); }
+    dismissModal(); render();
+    openMail(to,subj,body,DB.settings.ccEmail);
+    if(!window.claude) toast('Draft opened','Your email program should now have the '+k.name.toLowerCase()+' ready to send.');
+  },
+
+  /* --- work requests --- */
+  wrOpen(){ S.flow={mode:'wr',step:'type',clientId:S.clientId,fields:{}}; wrModal(); },
+  wrPick(){ S.flow={mode:'wr',step:'client',fields:{}}; wrModal(); },
+  wrClient(v){ S.flow.clientId=v; S.flow.step='type'; wrModal(); },
+  wrType(v){
+    const c=getClient(S.flow.clientId), t=wrType(v);
+    S.flow.type=v; S.flow.step='form';
+    S.flow.fields={team:t.team,ccy:c.data.meta.ffCurrency||'GBP'};
+    t.fields.forEach(fd=>{ if(fd.def) S.flow.fields[fd.id]=fd.def; });
+    wrModal();
+  },
+  wrBack(){ S.flow.step='type'; wrModal(); },
+  wrPreview(){
+    const c=getClient(S.flow.clientId);
+    const r={ref:'(not yet raised)',type:S.flow.type,fields:S.flow.fields,created:new Date().toISOString()};
+    openModal(mHead('Email preview',wrSubject(c,r))
+      +'<div class="m-b"><div class="small muted mb-s"><b>To:</b> '+esc(DB.settings.adminEmail||CFG.adminEmail)+'</div>'
+      +'<div class="pre">'+esc(wrBody(c,r))+'</div></div>'
+      +'<div class="m-f"><button class="btn" data-a="wrBackForm">'+ic('chevL',14)+' Back</button>'
+      +'<button class="btn pri" data-a="wrSave">'+ic('check',14)+' Raise request</button></div>',1);
+  },
+  wrBackForm(){ S.flow.step='form'; wrModal(); },
+  wrSave(){
+    const c=getClient(S.flow.clientId), t=wrType(S.flow.type);
+    const missing=t.fields.filter(fd=>fd.req&&!String(S.flow.fields[fd.id]||'').trim());
+    if(missing.length){
+      S.flow.step='form'; wrModal();
+      toast('Still needed',missing.map(m=>m.label).join(', '),'warn',6000);
+      return;
+    }
+    const n=DB.requests.length+1;
+    const r={ id:uid('wr'), ref:'WR-'+new Date().getFullYear()+'-'+String(n).padStart(4,'0'),
+      clientId:c.id, type:S.flow.type, fields:Object.assign({},S.flow.fields),
+      status:'Draft', created:new Date().toISOString(), sentAt:null };
+    DB.requests.unshift(r); save(true);
+    dismissModal(); render();
+    toast('Request raised',r.ref+' — open it to send the email.');
+    setTimeout(()=>wrViewModal(r.id),260);
+  },
+  wrView(v){ wrViewModal(v); },
+  wrSend(v){
+    const r=DB.requests.find(x=>x.id===v), c=getClient(r.clientId);
+    if(!c){ toast('Client deleted','Cannot build the email — the client record is gone.','warn'); return; }
+    r.status='Sent'; r.sentAt=new Date().toISOString(); save(true);
+    dismissModal(); render();
+    openMail(DB.settings.adminEmail||CFG.adminEmail,wrSubject(c,r),wrBody(c,r),DB.settings.ccEmail);
+    if(!window.claude) toast('Draft opened','Send it from your email program and '+r.ref+' is on its way.');
+  },
+  wrCopy(v){
+    const r=DB.requests.find(x=>x.id===v), c=getClient(r.clientId);
+    copyText(wrSubject(c,r)+'\n\n'+wrBody(c,r),'The request');
+  },
+  wrDone(v){
+    const r=DB.requests.find(x=>x.id===v);
+    r.status=r.status==='Complete'?'Sent':'Complete'; save(); render();
+  },
+  wrDel(v){
+    const r=DB.requests.find(x=>x.id===v);
+    confirmModal('Delete '+r.ref+'?','The request will be removed from this list. Any email you have already sent is unaffected.','Delete','wrDelGo',v);
+  },
+  wrDelGo(v){ DB.requests=DB.requests.filter(x=>x.id!==v); save(true); dismissModal(); render(); toast('Deleted','Request removed.','warn'); },
+
+  /* --- new client quick send --- */
+  quickSend(){ S.flow={mode:'qs'}; quickSendModal(); },
+  async quickSendGo(){
+    const v=S.flow||{};
+    if(!String(v.qsFirst||'').trim()||!String(v.qsSurname||'').trim()||!/@/.test(v.qsEmail||'')){
+      toast('Almost','A first name, surname and a valid email are needed.','warn'); return;
+    }
+    const c=blankClient();
+    c.data.personal.a1={firstName:v.qsFirst.trim(),surname:v.qsSurname.trim(),email:v.qsEmail.trim()};
+    c.status='Awaiting client';
+    DB.clients.unshift(c); save(true);
+    dismissModal();
+    S.clientId=c.id; S.screen='client'; S.section='personal'; render();
+    const nm=await downloadClientPage(c);
+    if(nm){
+      logSend(c,'factfind','form');
+      toast('Form ready','“'+nm+'” has downloaded — attach it to the email, then send.',null,9000);
+    }
+    openMail(v.qsEmail.trim(),SEND_KINDS.factfind.subject(c),sendBody(c,'factfind'),DB.settings.ccEmail);
+  },
+  async formDownload(){
+    const c=getClient(S.clientId);
+    const nm=await downloadClientPage(c);
+    if(nm){
+      logSend(c,'factfind','form');
+      toast('Form downloaded',nm+' — attach it to your email to '+(primaryEmail(c)||'the client')+'.');
+    }
+  },
+
+  /* --- import client reply --- */
+  importOpen(){ S.flow={mode:'import'}; importModal(); },
+  async importGo(){
+    const txt=($('#replyText')||{}).value||'';
+    if(!txt.trim()){ toast('Nothing to import','Paste the reply code first.','warn'); return; }
+    let payload;
+    try{ payload=await decodeReply(txt); }
+    catch(e){ toast('Could not read it',e.message,'risk',8000); return; }
+    let c=getClient(S.clientId);
+    /* opened from the clients list: find the record by reference */
+    if(!c){ c=DB.clients.find(x=>x.ref===payload.ref);
+      if(!c){ toast('No matching client','This reply is for '+(payload.ref||'an unknown reference')
+        +', which is not in this browser.','risk',8000); return; }
+      S.clientId=c.id;
+    }
+    if(payload.ref&&payload.ref!==c.ref&&!S.flow.importForce){
+      S.flow.importWarn='This reply carries reference '+payload.ref+' but you are importing into '+c.ref+'.';
+      S.flow.importForce=true; importModal(); return;
+    }
+    const summary=applyReply(c,payload);
+    S.flow.importResult=summary;
+    importModal();
+    render();
+  },
+
+  /* --- build a MADS workbook --- */
+  madsOpen(){ S.flow={mode:'mads'}; madsModal(); },
+  async madsGo(){
+    const f=($('#madsFile')||{}).files&&$('#madsFile').files[0];
+    if(!f){ toast('Choose a file first','Pick your blank MADS workbook.','warn'); return; }
+    const c=getClient(S.clientId);
+    toast('Building','Reading the workbook and writing the cells…');
+    try{
+      const res=await buildMads(f,c);
+      S.flow.result=res; S.flow.name='MADS - '+clientName(c)+'.xlsm';
+      madsModal();
+    }catch(e){
+      console.error(e);
+      toast('Could not build it',e.message||'The workbook could not be read.','risk',9000);
+    }
+  },
+  madsSave(){
+    const r=S.flow&&S.flow.result; if(!r) return;
+    const u=URL.createObjectURL(r.blob), a=document.createElement('a');
+    a.href=u; a.download=S.flow.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),2000);
+    toast('Saved',S.flow.name);
+    dismissModal();
+  },
+
+  /* --- exporting --- */
+  async dl(v){
+    const t=csvFor(v); if(!t) return;
+    await saveFile(t.name,t.text);
+  },
+  copyCsv(v){ const t=csvFor(v); if(t) copyText(t.text.replace(/^﻿/,''),t.name); },
+  async dlClient(){
+    const c=getClient(S.clientId);
+    await saveFile('factfind-'+c.ref+'-'+stamp()+'.csv',csvFull([c]));
+  },
+  async backup(){
+    const ok=await saveFile('sjb-factfind-backup-'+stamp()+'.json',backupJSON());
+    if(ok) toast('Keep it safe','Store this somewhere backed up — it is the only copy of your data outside this browser.','warn',7000);
+  },
+  copyUrl(){ copyText(CFG.publishedUrl,'The link'); },
+  hCopy(v){
+    if(!HANDOFF) return;
+    const t=v==='all'
+      ?'To: '+HANDOFF.to+(HANDOFF.cc?'\nCc: '+HANDOFF.cc:'')+'\nSubject: '+HANDOFF.subject+'\n\n'+HANDOFF.body
+      :HANDOFF[v]||'';
+    copyText(t,v==='all'?'The whole email':v==='body'?'The message':'The '+v+' line');
+  },
+  restoreOpen(){ restoreModal(); },
+  restoreGo(v){
+    const txt=($('#rtext')||{}).value||'';
+    if(!txt.trim()){ toast('Nothing to restore','Choose a file or paste the backup first.','warn'); return; }
+    try{
+      const n=restoreJSON(txt,v);
+      dismissModal(); S.screen='clients'; render();
+      toast('Restored',n+' client record'+(n===1?'':'s')+' '+(v==='replace'?'loaded':'merged in')+'.');
+    }catch(e){ toast('Could not restore',e.message||'The file could not be read.','risk',7000); }
+  },
+  wipe(){ confirmModal('Delete everything?',
+    'Every client, work request and setting stored in this browser will be erased. This cannot be undone. '
+    +'Download a backup first if there is any chance you will want this back.','Erase all data','wipeGo'); },
+  wipeGo(){
+    DB.clients=[]; DB.requests=[]; DB.sends=[];
+    try{ localStorage.removeItem(CFG.storeKey); }catch(e){}
+    save(true); dismissModal(); S.screen='clients'; S.clientId=null; render();
+    toast('Everything erased','The tool is back to empty.','warn');
+  }
+};
+function csvFor(v){
+  if(v==='mads') return {name:'MADS-import-all-'+stamp()+'.csv',text:csvMads(DB.clients)};
+  if(v==='madsOne'){
+    const c=getClient(S.clientId);
+    return {name:'MADS-'+c.ref+'-'+stamp()+'.csv',text:csvMads([c])};
+  }
+  if(v==='clients') return {name:'sjb-clients-'+stamp()+'.csv',text:csvClients()};
+  if(v==='full') return {name:'sjb-factfind-full-'+stamp()+'.csv',text:csvFull(DB.clients)};
+  if(v==='requests') return {name:'sjb-work-requests-'+stamp()+'.csv',text:csvRequests()};
+  if(v.indexOf('tbl:')===0){
+    const s=sectionById(v.slice(4));
+    return {name:'sjb-'+s.id.toLowerCase()+'-'+stamp()+'.csv',text:csvTable(s.id)};
+  }
+  return null;
+}
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-a]'); if(!el) return;
+  const a=el.dataset.a; if(a==='status') return;
+  const fn=ACT[a]; if(!fn) return;
+  e.preventDefault(); e.stopPropagation();
+  fn(el.dataset.v,el);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&$('#modal')) dismissModal();
+});
+/* Nobody expects a browser tool to lose an afternoon's typing. */
+window.addEventListener('beforeunload',()=>{ if(SAVE_T) save(true); });
+
+/* =============================== RENDER ================================= */
+/* When storage is refused this tool cannot do the one thing it exists for, so
+   say so permanently and in the way of the work — not in a toast that fades. */
+function storageBanner(){
+  if(STORE_OK) return '';
+  return '<div style="background:var(--risk);color:#fff;padding:11px 16px;display:flex;gap:11px;'
+    +'align-items:flex-start;font-size:13px;line-height:1.55">'
+    +'<span style="flex:0 0 17px;margin-top:1px">'+ic('alert',17)+'</span>'
+    +'<div><b>Nothing you type here is being saved.</b> This browser is blocking storage — usually a private '
+    +'window, or the page being opened in a way that has no storage of its own. Anything you enter will be lost '
+    +'when this tab closes. Open the file directly in your browser, or export a backup before you leave.</div>'
+    +'<button class="btn sm sp" data-a="go" data-v="export" style="background:#fff;border-color:#fff;color:var(--risk);flex:0 0 auto">'
+    +'Export now</button></div>';
+}
+function render(){
+  const body = S.screen==='client'?screenClient()
+    : S.screen==='requests'?screenRequests()
+    : S.screen==='export'?screenExport()
+    : S.screen==='settings'?screenSettings()
+    : screenClients();
+  $('#root').innerHTML='<div class="shell">'+railHTML()
+    +'<div class="main">'+topHTML()+storageBanner()+'<div class="page">'+body+'</div></div></div>';
+}
+function boot(){
+  probeStorage();
+  const had=load();
+  if(!DB.settings.adminEmail) DB.settings.adminEmail=CFG.adminEmail;
+  if(!DB.settings.portalBase) DB.settings.portalBase=CFG.portalBase;
+  render();
+  if(!STORE_OK){ STORE_WARNED=true; }
+  else if(!had){
+    setTimeout(()=>{
+      toast('Everything saves here','Your data is stored in this browser only. Take a backup from Export when you have entered anything worth keeping.','warn',9000);
+    },900);
+  }
+  /* Fail loudly rather than leaving a blank screen. */
+  window.addEventListener('error',ev=>{
+    console.error(ev.error||ev.message);
+    toast('Something went wrong',(ev.message||'Unexpected error')+' — your saved data is unaffected.','risk',8000);
+  });
+}
+/* Responsive: the side rail collapses below 900px, so the section list becomes
+   a normal stacked block rather than a sticky column. */
+const mq=document.createElement('style');
+mq.textContent='@media(max-width:900px){.ffgrid{grid-template-columns:1fr!important}'
+  +'.ffgrid>.card:first-child{position:static!important}'
+  +'.top button[data-a="go"][data-v="clients"]{display:inline-flex!important}}';
+document.head.appendChild(mq);

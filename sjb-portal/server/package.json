@@ -1,0 +1,13 @@
+{
+  "name": "sjb-factfind-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SJB Fact Find — adviser portal, client form and server. No dependencies.",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "adduser": "node server.js adduser"
+  },
+  "optionalDependencies": {}
+}

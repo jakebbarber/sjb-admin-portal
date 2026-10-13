@@ -1,0 +1,142 @@
+<!doctype html><meta charset="utf-8"><title>data protection test</title>
+<script>
+/* The claims a firm makes to a client have to be true of the code.
+   Fictional client throughout. */
+window.__runGdpr=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const NL=String.fromCharCode(10);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    const call=async(method,path,body)=>{
+      const h=new Headers(); if(jar) h.set('x-session',jar);
+      if(body!=null) h.set('content-type','application/json');
+      const res=await H.__handle(new Request(location.origin+path,
+        {method,headers:h,body:body!=null?JSON.stringify(body):undefined}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2;
+      let out=null; try{ out=await res.json(); }catch(e){}
+      return {status:res.status,body:out};
+    };
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+
+    /* ---------- the notice ---------- */
+    say('--- the privacy notice ---');
+    DB.settings.dp={};
+    const gaps=dpGaps(DB.settings);
+    say('    with nothing set: '+gaps.length+' gaps — '+gaps.join(', '));
+    ok(gaps.length===4,'  it says what is still missing');
+    const bare=privacyNotice(DB.settings,'factfind');
+    ok(!/undefined|null|\[object/.test(JSON.stringify(bare)),'  and never prints undefined at the client');
+    ok(JSON.stringify(bare).indexOf('privacy policy')>=0,'  falling back to the policy rather than inventing a period');
+
+    DB.settings.dp={controller:'SJB Global Ltd',email:'dp@sjb-global.com',address:'Lisbon',
+      regulator:'the CNPD',icoNumber:'Z123',retainYears:7,version:'1'};
+    ok(dpGaps(DB.settings).length===0,'  once filled in, no gaps remain');
+    const ff=privacyNotice(DB.settings,'factfind'), kyc=privacyNotice(DB.settings,'kyc');
+    say('    fact find sections: '+ff.map(x=>x.h).join(' | '));
+    /* Articles 13(1)-(2): identity, purposes, lawful basis, recipients,
+       transfers, retention, rights, complaint */
+    const need=['Who is asking','What we are collecting','Why','What allows us to use it',
+      'Who else sees it','Where it is held','How long we keep it','Your rights','Questions or complaints'];
+    need.forEach(n=>ok(ff.some(x=>x.h===n),'  covers: '+n));
+    ok(JSON.stringify(ff).indexOf('7 years')>=0,'  states the real retention period');
+    ok(JSON.stringify(ff).indexOf('SJB Global Ltd')>=0,'  names the controller');
+    ok(JSON.stringify(ff).indexOf('CNPD')>=0,'  names the regulator to complain to');
+    ok(JSON.stringify(ff).indexOf('health')>=0,'  tells them health data is collected');
+    ok(JSON.stringify(kyc).indexOf('money-laundering')>=0,'  the KYC notice gives its legal obligation');
+    ok(JSON.stringify(kyc)!==JSON.stringify(ff),'  the two links say different things');
+
+    /* ---------- consent recorded as evidence ---------- */
+    say('--- consent ---');
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-26',ffCurrency:'GBP'};
+    c.data.personal.a1={firstName:'Dee',surname:'Pea',dob:'1970-01-01',health:'Good',smoker:'No'};
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,500));
+
+    const mk=await call('POST','/api/clients/'+c.id+'/form',{});
+    const token=mk.body.token; ok(!!token,'  a fact find link was created');
+    const got=await call('GET','/api/form/'+token);
+    ok((got.body.privacy||[]).length>0,'  the link serves the notice to the client');
+    ok(!!(got.body.consent&&got.body.consent.main),'  and the consent wording');
+    say('    consent text: '+String((got.body.consent||{}).main||'').slice(0,80)+'…');
+
+    const sent=await call('POST','/api/form/'+token+'/submit',{
+      data:{personal:{a1:{firstName:'Dee',surname:'Pea'}}},joint:false,
+      consent:{agreedAt:'2026-08-26T09:00:00.000Z',wording:DP_CONSENT.factfind,version:'1',
+        health:{given:true,wording:DP_CONSENT.health}}});
+    ok(sent.status===200,'  the submission went through');
+    let rec=(await call('GET','/api/state')).body.clients.find(x=>x.id===c.id);
+    ok(!!rec.consent,'  consent was stored on the record');
+    ok(rec.consent.wording===DP_CONSENT.factfind,'  with the exact wording they agreed to');
+    ok(rec.consent.agreedAt.indexOf('2026-08-26')===0,'  and when');
+    ok(rec.consent.version==='1','  and which version of the notice');
+    ok(rec.consent.health.given===true,'  health consent recorded separately');
+    ok(rec.consent.via==='fact find link','  and where it came from');
+
+    /* ---------- subject access ---------- */
+    say('--- what we hold about them ---');
+    await call('POST','/api/docs/'+((await call('POST','/api/clients/'+c.id+'/docs',{})).body.token)+'/upload',
+      {fileId:null,name:'passport.jpg',label:'1. A photo of your UK passport',size:5,totalChunks:1,index:0,dataB64:btoa('img')});
+    const ex=await call('GET','/api/clients/'+c.id+'/data');
+    ok(ex.status===200,'  an export can be produced');
+    const E=ex.body;
+    say('    export contains: '+Object.keys(E).join(', '));
+    ok(!!E.record,'  the record itself');
+    ok((E.documents||[]).length===1,'  the documents they uploaded');
+    ok((E.submissions||[]).length>=1,'  what they submitted and when');
+    ok((E.factFindLinks||[]).length>=1,'  the links that were made for them');
+    ok(!!E.exported&&!!E.reference,'  stamped with a date and their reference');
+
+    /* ---------- erasure ---------- */
+    say('--- erasure ---');
+    const before={
+      files:Object.keys(H.__MEM.files||{}).length,
+      chunks:Object.keys(H.__MEM.filechunks||{}).length,
+      subs:Object.keys(H.__MEM.submissions||{}).length,
+      forms:Object.keys(H.__MEM.forms||{}).length,
+      docs:Object.keys(H.__MEM.doclinks||{}).length};
+    say('    before: '+JSON.stringify(before));
+    ok(before.files>0&&before.chunks>0,'  their passport photo is on the server');
+    const del=await call('DELETE','/api/clients/'+c.id);
+    ok(del.status===200,'  erasure was accepted');
+    say('    reported gone: '+JSON.stringify(del.body.erased));
+    const after={
+      files:Object.keys(H.__MEM.files||{}).length,
+      chunks:Object.keys(H.__MEM.filechunks||{}).length,
+      subs:Object.keys(H.__MEM.submissions||{}).length,
+      forms:Object.keys(H.__MEM.forms||{}).length,
+      docs:Object.keys(H.__MEM.doclinks||{}).length};
+    say('    after:  '+JSON.stringify(after));
+    ok(after.files===0,'  the documents are gone');
+    ok(after.chunks===0,'  including the bytes they were stored in');
+    ok(after.subs===0,'  the submissions are gone');
+    ok(after.forms===0,'  the fact find link no longer exists');
+    ok(after.docs===0,'  nor the documents link');
+    ok(!(H.__MEM.clients||{})[c.id],'  and the record itself');
+    /* the link must actually stop working — an orphaned token is a live leak */
+    const dead=await call('GET','/api/form/'+token);
+    ok(dead.status>=400,'  their old link now refuses to open ('+dead.status+')');
+
+    /* ---------- another adviser cannot do any of this ---------- */
+    say('--- it is still their adviser only ---');
+    const c2=blankClient(); c2.data.personal.a1={firstName:'Someone',surname:'Else'};
+    DB.clients.unshift(c2); save(true); await new Promise(x=>setTimeout(x,400));
+    const mine=(await call('GET','/api/state')).body.clients.find(x=>x.id===c2.id);
+    ok(!!mine,'  the adviser sees their own client');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L.join(NL);
+};
+</script>

@@ -1,0 +1,414 @@
+/* ===========================================================================
+   MADS EXPORT
+   The admin team paste this into the MADS Template sheet and mail-merge the
+   Word documents from it, so the shape is not negotiable: every one of the
+   Template sheet's columns, in its exact order, under its exact name. Fields
+   the Fact Find does not capture are emitted empty rather than omitted — a
+   missing column shifts every column after it and silently corrupts the merge.
+
+   Columns whose MADS name ends "in FF Currency" are left blank on purpose:
+   those cells hold formulas in the workbook and must be allowed to calculate.
+   ========================================================================= */
+const MADS_OWNER={'Applicant 1':'APPLICANT 1','Applicant 2':'APPLICANT 2','Joint':'Joint'};
+function mOwner(v){ return MADS_OWNER[v]||v||''; }
+/* The workbook is en-GB; dates must arrive in a form Excel reads as dates. */
+function mDate(v){ const d=D(v); return d? d2(d.getDate())+'/'+d2(d.getMonth()+1)+'/'+d.getFullYear():''; }
+function mNum(v){ return (v===''||v==null||isNaN(v))?'':Number(v); }
+/* The Reco sheet's charge cells are formatted 0.00%, so Excel wants the
+   fraction. Every percentage field in the Fact Find is labelled "(%)" and is
+   typed as 1.05 meaning 1.05%, which the workbook holds as 0.0105. */
+function mPct(v){ const n=mNum(v); return n===''?'':n/100; }
+function mYear(v){ const d=D(v); return d?d.getFullYear():(v||''); }
+
+function madsValues(c){
+  const V={};
+  /* put() ignores blanks so an unmapped or unanswered field never writes an
+     empty string over something the workbook already knows. */
+  const put=(names,val)=>{
+    if(val==null||val===''||(typeof val==='number'&&isNaN(val))) return;
+    (Array.isArray(names)?names:[names]).forEach(n=>{ V[n]=val; });
+  };
+  const P=c.data.personal||{}, a=P.a1||{}, b=P.a2||{};
+  const E=c.data.employment||{}, e1=E.a1||{}, e2=E.a2||{};
+  const R=(c.data.retirement||{}).a1||{}, K=(c.data.kyc||{}).a1||{};
+  const Q=(c.data.risk||{}).a1||{}, G=c.data.esg||{}, M=c.data.meta||{};
+  const EST=(c.data.estate||{}).a1||{};
+
+  /* ---- fact find header ---- */
+  put('Adviser Name',M.adviser||DB.settings.adviserName);
+  put('email address',M.adviserEmail||DB.settings.adviserEmail);
+  put('CURRENCY OF FACT FIND',M.ffCurrency);
+  put('Date of Fact Find',mDate(M.ffDate));
+  put('Lead Source Entry',M.introducer);
+  put('How Business was Conducted',K.method);
+
+  /* ---- applicant 1 ---- */
+  put('Title',a.title); put('First Name',a.firstName); put('Surname',a.surname);
+  put('Date of birth',mDate(a.dob)); put('Client Age',age(a.dob));
+  put('Mobile Number',a.mobile); put('Email Address',a.email);
+  put('NI Number',a.nino); put('Country of tax resident',a.taxResidence);
+  put('Client Nationality',a.nationality); put('Place of birth',a.birthCountry);
+  put('How long tax resident?',a.taxResidentSince);
+  put('What year did you leave the UK?',mYear(a.leftUK));
+  put('State of health',a.health);
+  put('If state of health is not good, please state why',a.healthNotes);
+  put('Smoker/non-smoker',a.smoker); put('Marital status',a.marital);
+
+  /* Address lines come from the current address row (the one with no end date,
+     else the most recent). */
+  const addrs=(c.data.addresses||[]).filter(x=>x.owner!=='Applicant 2');
+  const cur=addrs.find(x=>!x.to)||addrs[addrs.length-1];
+  if(cur){
+    put('Address Line 1',cur.line1); put('Address Line 2',cur.city);
+    put('Address Line 3',cur.postcode); put('Address Line 4',cur.country);
+  }
+
+  /* ---- applicant 2 (MADS calls them Partner, and Spouse in older columns) ---- */
+  put("Partner's Title",b.title); put("Partner's first name",b.firstName);
+  put('Spouse surname',b.surname);
+  put(["Partner's DOB",'Spouse DOB'],mDate(b.dob));
+  put("Partner's age",age(b.dob));
+  put("Partner's Mobile",b.mobile);
+  put("Partner's Personal Email Address ",b.email);
+  put("Partner's Country of tax residence",b.taxResidence);
+  put(["What is your Partner's nationality?",'Partners Nationality'],b.nationality);
+  put("Partner's Place of Birth ",b.birthCountry);
+  put('How many years has your partner been a tax resident in your country of residence?',b.taxResidentSince);
+  put('What date did your Partner leave the UK? (If applicable)',mDate(b.leftUK));
+  put("Partner's State of health",b.health);
+  put("If Partner's state of health is not good, please state why",b.healthNotes);
+  put("Partner's Smoker/non-smoker status",b.smoker);
+  const addr2=(c.data.addresses||[]).filter(x=>x.owner==='Applicant 2');
+  const cur2=addr2.find(x=>!x.to)||addr2[addr2.length-1];
+  if(cur2){
+    put("Partner's Address Line 1",cur2.line1); put("Partner's Address  Line 2",cur2.city);
+    put("Partner's Address  Line 3",cur2.postcode); put("Partner's Address  Line 4",cur2.country);
+  }
+
+  /* ---- employment ---- */
+  put('Job Title (Occupations)',e1.occupation); put('Name of Employer',e1.employer);
+  put('Status',e1.status); put('Gross Annual salary',mNum(e1.salary));
+  put('Client Gross Annual Salary Currency',e1.salaryCcy);
+  put('Date employment began',mDate(e1.since));
+  put('Previous Occupation (if Retired)',e1.prevOccupation);
+  put('Date Retired (if retired)',mDate(e1.retiredDate));
+  if(e1.salary||e1.bonus) put('Annual Salary (including bonuses)',(Number(e1.salary)||0)+(Number(e1.bonus)||0));
+
+  put(["Partner's Job Title (Occupation)",'Spouse occupation'],e2.occupation);
+  put("Partner's Name of Employer / Company",e2.employer);
+  put("Partner's Work Status",e2.status);
+  put(["What currency is your partner's salary paid in?",'Spouse Gross Annual Salary Currency'],e2.salaryCcy);
+  put("Estimate Date your Partner's current Employment / Self - Employment Began",mDate(e2.since));
+  put("Partner's Previous Occupation",e2.prevOccupation);
+  put('Estimate Date your Partner stopped working',mDate(e2.retiredDate));
+  if(e2.salary||e2.bonus)
+    put(["Partners' Total Gross Annual Salary including bonus",'Spouse annual Salary'],
+      (Number(e2.salary)||0)+(Number(e2.bonus)||0));
+
+  /* ---- children ---- */
+  const kids=c.data.dependants||[];
+  put('Number of children',kids.length||'');
+  kids.slice(0,10).forEach((k,i)=>{ const n=i+1;
+    put('Child '+n+' Name',k.name);
+    put('Child '+n+' date of birth',mDate(k.dob));
+    put('Child '+n+' Age',age(k.dob));
+  });
+
+  /* ---- retirement ---- */
+  put('Where will you retire',R.retireCountry);
+  put('Retirement Age',mNum(R.retireAge));
+  put('Desired Net Retirement Income Currency',R.incomeCcy);
+  put('Desired Net Retirement Income',mNum(R.desiredIncome));
+  put('Who does the Desired Net Retirement Income cover?',R.covers);
+
+  /* ---- property: MADS holds the first as "Residence", the rest as Property 2..10 ---- */
+  const props=(c.data.properties||[]).slice();
+  const mainIdx=props.findIndex(p=>p.type==='Main residence');
+  if(mainIdx>0) props.unshift(props.splice(mainIdx,1)[0]);
+  if(props[0]){ const p=props[0];
+    put('Owner Main Residence',mOwner(p.owner));
+    put('Main Residence location',p.location);
+    put('Residence Purchase date',p.purchased);
+    put('Residence Purchase price',mNum(p.purchasePrice));
+    put('Residence Current value',mNum(p.value));
+    put('Residence Mortgage outstanding',mNum(p.mortgage));
+    put('Residence Repayment or interest only',p.mortgageType);
+    put('Residence Term left',mNum(p.term));
+    put('Residence Monthly repayment cost',mNum(p.monthly));
+    put('Residence Monthly Rental Income',mNum(p.rental));
+    put('Property Currency 1',p.ccy);
+  }
+  props.slice(1,10).forEach((p,i)=>{ const n=i+2;
+    put('Property '+n+' Owner 2',mOwner(p.owner));
+    put('Property '+n+' location',p.location);
+    put('Property '+n+' Purchase date',p.purchased);
+    put('Property '+n+' Purchase price',mNum(p.purchasePrice));
+    put('Property '+n+' Current value',mNum(p.value));
+    put('Property '+n+' Mortgage outstanding',mNum(p.mortgage));
+    put('Property '+n+' Repayment or interest only',p.mortgageType);
+    put('Property '+n+' Term left',mNum(p.term));
+    put('Property '+n+' Monthly repayment cost',mNum(p.monthly));
+    put('Property '+n+' Rental Income',mNum(p.rental));
+    put('Property Currency '+n,p.ccy);
+  });
+
+  /* ---- cash: MADS "Bank n" plus a parallel "Cash currency n" ---- */
+  (c.data.cash||[]).slice(0,10).forEach((x,i)=>{ const n=i+1;
+    put('Bank '+n+' Owner',mOwner(x.owner));
+    put(['Bank Name '+n,'Bank '+n+' Name'],x.bank);   /* renamed between MADS versions */
+    put('Bank '+n+' Account Type',x.type);
+    put('Bank '+n+' Location',x.location);
+    put('Bank '+n+' Amount',mNum(x.amount));
+    put('Cash currency '+n,x.ccy);
+  });
+
+  /* ---- investments ---- */
+  (c.data.investments||[]).slice(0,10).forEach((x,i)=>{ const n=i+1;
+    put('Investment '+n+' Owner ',mOwner(x.owner));
+    put('Investment '+n+' Provider ',x.provider);
+    put('Investment '+n+' Type',x.type);
+    put('Investment '+n+' Location',x.location);
+    put('Investment currency '+n,x.ccy);
+    put('Investment '+n+' Amount',mNum(x.value));
+  });
+
+  /* ---- DC pensions -> "Additional Pension n" ---- */
+  (c.data.dcPensions||[]).slice(0,10).forEach((x,i)=>{ const n=i+1;
+    put('Additional Pension '+n,x.name);              /* the scheme name column */
+    put('Additional Pension '+n+' Owner ',mOwner(x.owner));
+    put('Additional Pension '+n+'  Type',x.type);
+    put('Additional Pension '+n+' Normal Retirement Age',mNum(x.nmpa));
+    put('Additional Pension '+n+' Employer Contributions (Annual)',mNum(x.employerContrib));
+    put('Additional Pension '+n+' Personal Contributions (Annual)',mNum(x.personalContrib));
+    put('Additional Pension '+n+' Current Value',mNum(x.value));
+  });
+
+  /* ---- state pensions ---- */
+  (c.data.statePensions||[]).slice(0,10).forEach((x,i)=>{ const n=i+1;
+    put('State Pension '+n+' Owner ',mOwner(x.owner));
+    put('State Pension '+n+' Country of State Pension',x.country);
+    put('State Pension '+n+' Years of contributions',mNum(x.years));
+    put('State Pension '+n+' Age',mNum(x.spa));
+    put('State Pension '+n+' Estimated Amount today',mNum(x.amount));
+  });
+
+  /* ---- loans and credit cards ---- */
+  const liabs=c.data.liabilities||[];
+  liabs.filter(x=>x.type!=='Credit card').slice(0,10).forEach((x,i)=>{ const n=i+1;
+    put('Loan '+n+' Owner',mOwner(x.owner));
+    put('Loan '+n+' Type',x.type);
+    put('Loan Currency '+n,x.ccy);
+    put('Loan '+n+' Amount',mNum(x.balance));
+    put('Loan '+n+' Monthly Premiums',mNum(x.monthly));
+    put('Loan '+n+' Term',mNum(x.term));
+  });
+
+  /* ---- expenditure: the four simple numbers, into Joint or Individual ---- */
+  const EX=c.data.incomeExp||{};
+  const expWho=hasApplicant2(c)?'Joint':'Individual';
+  put('Expenditure '+expWho+' Total Annual Expenditure (individual not joint)',mNum(EX.expTotal));
+  put('Expenditure '+expWho+' Annual Mortgages',mNum(EX.expMortgage));
+  put('Expenditure '+expWho+' Loans',mNum(EX.expLoans));
+  put('Expenditure '+expWho+' Credit cards',mNum(EX.expCards));
+  liabs.filter(x=>x.type==='Credit card').slice(0,8).forEach((x,i)=>{ const n=i+1;
+    put('Credit Card '+n+' Owner',mOwner(x.owner));
+    put('Credit Card '+n+' Type',x.lender);
+    put('Credit Card '+n+' Amount',mNum(x.balance));
+  });
+
+  /* ---- protection ---- */
+  (c.data.protection||[]).slice(0,7).forEach((x,i)=>{ const n=i+1;
+    put('Life Insurance '+n+' Owner',mOwner(x.owner));
+    put('Life Insurance '+n+' Name',[x.provider,x.type].filter(Boolean).join(' — '));
+    put('Life Insurance '+n+' Insured Amount',mNum(x.sumAssured));
+    put('Life Insurance '+n+' Monthly  Premiums',mNum(x.premium));
+  });
+
+  /* ---- attitude to risk ---- */
+  put('RPQ ATR Result',mNum(Q.atrScore));
+  put(['RPQ Please state risk profile the client wishes to choose','UK Risk profile'],Q.atrChosen);
+  put('RPQ What is your chosen investment objective?',Q.objective);
+  put(['RPQ What is your maximum ability to bear loss?','UK RPQ Capacity for loss'],Q.capacity);
+  put('RPQ Are you intending to withdraw income from this portfolio?',Q.withdrawIncome);
+  put('RPQ Do you wish to exclude any types of investments?',Q.exclusions);
+  put('RPQ 2. How many years of investment experience do you have?',Q.experience);
+  put(['RPQ 7. How long do you like to invest for?','IQ What is your time horizon on the proposed investment?'],Q.horizon);
+  put('RPQ 8. How many months income is in cash?',mNum(Q.cashMonths));
+
+  /* ---- sustainability ---- */
+  put('ESGQ Is it important to you to consider',G.consider);
+  put('ESGQ Insert a summary of initial discussion',G.discussion);
+  put('ESGQ Exclusions',G.excluded);
+
+  /* ---- KYC and beneficiaries land in the Apps Out block ---- */
+  put("APPS OUT 1 Client Cat - Are you a Politically Exposed Person ('PEP')?",K.pep);
+  put('APPS OUT 1 - Source of Wealth',K.sow);
+  put('APPS OUT 1 - Source of funds',K.sof);
+  put('APPS OUT 1 DD - Whats your Tax Identification Number? (TIN)',a.tin);
+  put('APPS OUT 1 - Lead Source Entry',c.data.meta.introducer);
+  put('APPS OUT 1 - How was the business conducted',K.method);
+  const vul=(c.data.vulnerability||{}).a1||{};
+  if(vul.identified==='Yes'){
+    put('APPS OUT 1 - Vulnerability Type',vul.type);
+    put('APPS OUT 1 - Nature of Vulnerability Notes',vul.description);
+  }
+  /* ---- the recommendation (Fact Find → Advice) -> Reco / Apps Out ---- */
+  const rec=(c.data&&c.data.recommendation)||c.rec||{};
+  /* The amount goes to "Reco PREMIUM INVESTED" (Reco!B55), not to "Investment
+     Recommendation" — that column belongs to the regular-contribution block
+     lower down the sheet and holds a portfolio name. */
+  put('APPS OUT 1 - Reg - Amount',mNum(rec.regular));
+  put('APPS OUT 1 - Please use "IDD & MIFID List" tab to chose the correct one',
+    [rec.product,rec.provider].filter(Boolean).join(' - '));
+  /* the four narrative blocks the Apps Out sheet asks for, in its own words */
+  put('IQ In your own words, what would be the most important factor/s for you investing this money?',rec.lumpSumFactors);
+  put('APPS OUT 1 Are your retirement goals achievable?',
+    [rec.retirementOnTrack,rec.retirementNarrative].filter(Boolean).join('\n\n'));
+  put('APPS OUT 1 Main Objetives (Keep the ones that are relevant)',rec.mainObjectives);
+  put('UK advice paragraph',rec.ukNarrative);
+
+  /* ---- the rest of the Reco sheet, so admin can process the application ----
+     Some of these inputs have no mail-merge column of their own; those use the
+     `@Reco!cell` form, which madsCellPlan writes straight to the cell. Row
+     numbers are MADS V.28. */
+  put('Reco Type of Recommendation',rec.recoType);
+  put('@Reco!B36',rec.busType);
+  put('Reco  SJB Ongoing Adviser Fee %',mPct(rec.ongoing));
+  /* platform */
+  put('Reco Platform Name',[rec.product,rec.provider].filter(Boolean).join(' - '));
+  put('Reco Chosen Platform Annual Fee',mPct(rec.platformFee));
+  put('Fee or Commission?',rec.feeComm);
+  put('Reco Fee Schedule Chosen',rec.feeSchedule);
+  put('Reco Currency of premium',rec.platformCcy||rec.ccy);
+  put('Reco Chosen Platform Quarterly Admin Fee',mNum(rec.platformQuarterly));
+  put('Reco Chosen Platform Initial Fee',mPct(rec.platformInitial));
+  put('Reco PREMIUM INVESTED',mNum(rec.amount));
+  put('Reco SJB Initial Adviser fee %',mPct(rec.initial));
+  /* investment */
+  put('Reco Investment Recommendation',rec.strategy);
+  put('Reco Currency',rec.investCcy||rec.ccy);
+  put('Reco Aggregated Annual Total Expense Ratio',mPct(rec.ocf));
+  put('DFM AMC',mPct(rec.dfmFee));
+  put('5 year cumulative return',mPct(rec.fiveYearReturn));
+  /* trustee */
+  put('Reco Trust Name',rec.trustName);
+  put('Reco Chosen Trustee Initial Charge',mNum(rec.trusteeInitial));
+  put('@Reco!B45',rec.trusteeCcy);
+  put('Reco Chosen Trustee Annual Charge',mNum(rec.trusteeAnnual));
+  /* top up */
+  put('@Reco!B40',rec.topupPolicyNo);
+  put('@Reco!C40',mNum(rec.topupAmount));
+  put('@Reco!B41',rec.topupCcy);
+  /* withdrawals */
+  put('@Reco!B65',rec.withdrawing);
+  put('@Reco!B66',rec.pclsTiming);
+  put('@Reco!B67',rec.withdrawAmount);
+  put('@Reco!B68',rec.withdrawFrequency);
+  put('@Reco!B69',rec.withdrawReason);
+  put('APPS OUT 1 IMMED WITHD Is income to be taken immediately?',rec.incomeImmediate);
+  put('APPS OUT 1 IMMED WITHD Is PCLS to be taken immediately?',rec.pclsImmediate);
+  /* regular contributions */
+  put('APPS OUT 1 - Reg Currency',rec.regCcy||rec.ccy);
+  put('APPS OUT 1 - Reg - Would this be paid in annually, quarterly, semi-annually or monthly?',rec.regFrequency);
+  put('APPS OUT 1 - Reg - Initial Adviser fee %',mPct(rec.regInitial));
+  put('@Reco!B95',rec.regStrategy);
+  put('@Reco!B96',rec.regInvestCcy);
+  /* DB business */
+  put('Reco DB AIA Report Writer Chosen',rec.dbAiaWriter);
+  put('@Reco!B4',rec.dbAiaCcy);
+  put('@Reco!C4',mNum(rec.dbAiaCost));
+  put('@Reco!B6',rec.dbAiaPaid);
+  put('@Reco!B7',rec.dbAiaInvoice);
+
+  /* ---- the ceding pensions, column by column on the Reco sheet ----
+     Ten columns, B..K. Everything the provider told us in reply to the LOA,
+     which is what the application actually needs. */
+  (c.data.dcPensions||[]).slice(0,10).forEach((p,i)=>{
+    const n=i+1, col=String.fromCharCode(66+i);   /* B = pension 1 */
+    put('UK PI DC '+n+' Owner',mOwner(p.owner));
+    put(['UK PI DC '+n+' Pension Name','UK PI DC '+n+' Pension Name '],p.name);
+    put('@Reco!'+col+'9',p.name);
+    put('Reco Report DC '+n+' Recommendation',p.dcReco);
+    put('@Reco!'+col+'11',mNum(p.partialAmount));
+    put(['UK PI DC '+n+' Value','UK PI DC '+n+'  Value','UK PI DC '+n+' Fund Value'],mNum(p.value));
+    put('UK PI DC '+n+' TVQ Amount',mNum(p.tvq));
+    put('UK PI DC '+n+' Exit Fee/Bonus',p.exitFee);
+    put('@Reco!'+col+'15',p.policyNo);
+    put(['UK PI DC number of funds available','UK PI DC '+n+' - number of funds available',
+         'UK PI DC '+n+'  number of funds available'],p.fundSelection);
+    put('UK PI DC '+n+' Performance of fund',p.performance);
+    put(['UK PI DC '+n+' Bid/Offer Spread','UK PI DC '+n+' - Bid/Offer Spread'],mPct(p.bidOffer));
+    put('UK PI DC '+n+' Retirement Options - Is Flexi-acces drawdown available?',p.retOptionsUK);
+    put('UK PI DC '+n+' Retirement Options – Can I choose these retirement options as a non-UK resident?',
+      p.retOptionsNonUK);
+    put('UK PI DC '+n+' Death Benefits – Can the beneficiary I chose take the pension as a lump sum?',p.deathUK);
+    put('UK PI DC '+n+' Death Benefits – Can I move funds to a dependant’s or nominee’s flexi-access drawdown pension?',
+      p.deathNonUK);
+    put(['UK PI DC '+n+' Guarantees or bonuses','UK PI DC '+n+' Guarantees or bonuses '],p.guarantees);
+    put('UK PI DC '+n+' - Crystallised/Uncrystallised',p.crystallised);
+    put('@Reco!'+col+'25',mPct(p.crystallisedPct));
+    put('Annual Adviser % Fees '+n,mPct(p.adviserFeePct));
+    put('UK PI DC '+n+' Annual Charges',mPct(p.amc));
+    put('@Reco!'+col+'28',p.mpaa);
+    put('UK PI DC '+n+' Date of TVQ',mDate(p.tvqDate||p.valuedAt));
+    put('UK PI DC '+n+' Normal Minimum Pension Age',mNum(p.nmpa));
+    put(['UK PI DC '+n+' DC Pension Currency','UK PI DC '+n+'  DC Pension Currency'],p.ccy);
+  });
+  /* ---- the ceding DB schemes, same idea ---- */
+  (c.data.dbPensions||[]).slice(0,10).forEach((p,i)=>{
+    const n=i+1;
+    put('UK PI DB '+n+' Owner',mOwner(p.owner));
+    put('UK PI DB '+n+' Pension Name',p.name);
+    put('UK PI DB '+n+' Date of CETV',mDate(p.cetvDate));
+    put('UK PI DB '+n+' Normal Retirement Date',mNum(p.nra));
+    put('UK PI DB '+n+' Is this transferable?',p.transferable);
+    put('UK PI DB '+n+' Estimated deferred income today',mNum(p.income));
+    put('UK PI DB '+n+' CETV Amount in GBP',mNum(p.cetv));
+    put('UK PI DB '+n+' Expiry Date',mDate(p.cetvExpiry));
+    put('UK PI DB '+n+' GMP Amount in income',mNum(p.gmp));
+    put(['UK DB '+n+' Policy Number','UK PI DB '+n+' Policy Number'],p.policyNo);
+    put('UK PI DB '+n+' Death Benefits',p.spouse);
+  });
+  (c.data.beneficiaries||[]).slice(0,4).forEach((x,i)=>{ const n=i+1;
+    put('APPS OUT 1 Beneficiary - Full Name '+n,x.name);
+    put('APPS OUT 1 Beneficiary - Relationship '+n,x.relationship);
+    put('APPS OUT 1 Beneficiary - Date of Birth '+n,mDate(x.dob));
+    put('APPS OUT 1 Beneficiary - Telephone Number '+n,x.phone);
+    put('APPS OUT 1 Beneficiary - Email '+n,x.email);
+    put('APPS OUT 1 Beneficiary - Residential Address '+n,x.address);
+    put('APPS OUT 1 Beneficiary - Total Percentage of Benefit '+n,mNum(x.pct));
+  });
+  const bank=(c.data.bank||[])[0];
+  if(bank){
+    put('APPS OUT 1  UK or Intl Name of Bank',bank.bank);
+    put('APPS OUT 1 UK or Intl Account Name',bank.accountName);
+    put('APPS OUT 1 UK or Intl BIC',bank.bic);
+    put('APPS OUT 1 UK or Intl IBAN Number',bank.iban);
+    put('APPS OUT 1 UK or Intl Account Number',bank.accountNo);
+    put('APPS OUT 1 UK or Intl Swift/Sort Code',bank.sortCode);
+    put('APPS OUT 1 UK or Intl How long had bank account? (state rough time if not sure)',bank.heldSince);
+    put('APPS OUT 1 UK or Intl Bank Currency',bank.ccy);
+    put('APPS OUT 1 UK or Intl Proof of  Bank',bank.proof);
+  }
+  return V;
+}
+function csvMads(clients){
+  /* Headings keep their line breaks — they must match the workbook exactly.
+     Values do not: a line break inside a cell breaks a paste into Excel, and
+     nothing in a merge field needs the newline. */
+  const flat=v=>typeof v==='string'?v.replace(/\s*[\r\n]+\s*/g,' ').trim():v;
+  const rows=[MADS_COLS.slice()];
+  clients.forEach(c=>{
+    const V=madsValues(c);
+    rows.push(MADS_COLS.map(n=>{ const v=V[n]; return v==null?'':flat(v); }));
+  });
+  return toCSV(rows);
+}
+/* How much of the MADS this record actually fills — worth knowing before the
+   admin team open it and find it half empty. */
+function madsFilled(c){
+  const V=madsValues(c);
+  const set=new Set(MADS_COLS);
+  let n=0; Object.keys(V).forEach(k=>{ if(set.has(k)) n++; });
+  return n;
+}

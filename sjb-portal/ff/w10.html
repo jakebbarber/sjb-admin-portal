@@ -1,0 +1,553 @@
+/* ===========================================================================
+   CLIENT FACT FIND — generator + the app that runs inside the generated file.
+
+   The adviser presses "Send Fact Find", which produces a single HTML file
+   personalised to the client (their name, reference, the adviser's email, and
+   anything already on record) and an email draft to attach it to. The client
+   opens it in any browser, works through a plain-language wizard, and at the
+   end presses one button that copies a compact reply code and opens an email
+   back to the adviser. Pasting that code into this tool fills the record.
+
+   Nothing in the loop needs a server: the form travels as an attachment, the
+   answers travel back inside a normal email, and the notification that it is
+   done is that email arriving.
+   ========================================================================= */
+
+/* Sections the client fills. Adviser-only ones (KYC, vulnerability, risk
+   scoring, the meta sheet) never leave this tool.
+
+   Beneficiaries and bank details are deliberately absent: the advisers asked
+   for them off the form. Both are better taken in conversation, and a bank
+   account is not something to ask anyone to type into a page that arrived by
+   email. Both stay in the portal, so the MADS still gets them. */
+const CLIENT_SECTION_IDS=['personal','addresses','dependants','employment','retirement',
+  'estate','properties','cash','investments','dcPensions','dbPensions','statePensions',
+  'liabilities','protection','incomeExp'];
+/* Fields marked `adviser:` come from the provider or from our own judgement —
+   a transfer value, a CETV, an exit fee, an IHT position. On the client's copy
+   they are noise at best and unanswerable at worst. `reco:` is the same for
+   the ceding-scheme questions. */
+function clientFields(list){ return (list||[]).filter(f=>!f.adviser&&!f.reco); }
+/* Friendlier titles and intros than the adviser's working labels. */
+const CLIENT_COPY={
+  personal:{t:'About you',d:'The basics — who you are and how to reach you.'},
+  addresses:{t:'Where you live',d:'Your current address, and anywhere else you have lived in the last three years.'},
+  dependants:{t:'Family',d:'Children and anyone else who depends on you financially.'},
+  employment:{t:'Work & income',d:'What you do and what you earn. Round figures are fine.'},
+  retirement:{t:'Retirement',d:'When you would like to stop working, where, and on what income.'},
+  estate:{t:'Wills & estate',d:'Three short questions: your will, power of attorney, and anything you expect to inherit.'},
+  properties:{t:'Property',d:'Your home and any other property, in the currency it is valued in.'},
+  cash:{t:'Bank & savings accounts',d:'Where your cash sits. Approximate balances are fine.'},
+  investments:{t:'Investments',d:'ISAs, investment accounts, bonds — anything invested.'},
+  dcPensions:{t:'Pensions',d:'Just the provider, the policy number and roughly what each pot is worth. We write to the providers for everything else, so do not worry about the detail.'},
+  dbPensions:{t:'Final salary pensions',d:'Pensions that promise an income rather than a pot. Skip if you have none.'},
+  statePensions:{t:'State pensions',d:'From any country where you have made contributions.'},
+  liabilities:{t:'Loans & credit cards',d:'Anything you owe, other than mortgages (those were covered under Property).'},
+  protection:{t:'Insurance',d:'Life cover, illness cover, income protection, private healthcare.'},
+  incomeExp:{t:'Your spending',d:'A few yearly figures — close estimates are fine. This is the only place we ask about what you spend.'}
+};
+
+/* What we pre-fill for them. The form travels by email, so it should carry
+   only what the client is being asked about: a transfer value we obtained from
+   the provider, an IHT position, our own workings — none of that belongs in a
+   file that leaves the office, even though no field on their form shows it. */
+function clientSubsetData(c){
+  const d={};
+  const keep=(obj,fields)=>{ const o={}; clientFields(fields).forEach(fd=>{
+    if(obj&&obj[fd.id]!=null&&obj[fd.id]!=='') o[fd.id]=obj[fd.id]; }); return o; };
+  CLIENT_SECTION_IDS.forEach(id=>{
+    const s=sectionById(id), had=c.data[id];
+    if(s.rows) d[id]=(had||[]).map(r=>keep(r,s.cols));
+    else if(s.per) d[id]={a1:keep((had||{}).a1,s.fields),a2:keep((had||{}).a2,s.fields)};
+    else d[id]=keep(had,s.fields);
+  });
+  return d;
+}
+
+/* The whole client-side app. Runs only inside the generated file — written as
+   a single self-contained function so it can be stringified into it. Keep it
+   free of references to anything outside CTX. */
+function SJB_CLIENT_APP(CTX){
+  const $=(s,r)=>(r||document).querySelector(s);
+  const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const store='sjbff.'+CTX.ref;
+  let D=CTX.data, joint=CTX.joint, stepIx=-1, sent=false;
+  /* resume anything they already started */
+  try{ const raw=localStorage.getItem(store);
+    if(raw){ const o=JSON.parse(raw); if(o&&o.data){ D=o.data; joint=!!o.joint; stepIx=(typeof o.stepIx==='number')?o.stepIx:-1; } }
+  }catch(e){}
+  let saveT=null;
+  function save(){ clearTimeout(saveT); saveT=setTimeout(()=>{ try{
+    localStorage.setItem(store,JSON.stringify({data:D,joint,stepIx,at:Date.now()})); }catch(e){} },300); }
+
+  const SECS=CTX.sections;
+  function steps(){ return SECS.filter(s=>joint||s.per!=='applicant'||true); }
+  function listFor(k){ return k==='currency'?CTX.currencies:(CTX.lists[k]||[]); }
+  function control(fd,val,path){
+    const p=' data-p="'+esc(path)+'"';
+    if(fd.type==='select'){
+      const arr=typeof fd.list==='string'?listFor(fd.list):(fd.list||[]);
+      return '<select class="inp"'+p+'><option value="">Please choose…</option>'
+        +arr.map(o=>'<option'+(String(val)===String(o)?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';
+    }
+    if(fd.type==='textarea') return '<textarea class="inp ta"'+p+' rows="3">'+esc(val)+'</textarea>';
+    const t=fd.type==='number'?'number':fd.type==='date'?'date':fd.type==='email'?'email':fd.type==='tel'?'tel':'text';
+    return '<input class="inp" type="'+t+'"'+p+' value="'+esc(val)+'"'+(fd.type==='number'?' step="any" inputmode="decimal"':'')+'>';
+  }
+  function fieldHtml(fd,val,path){
+    return '<div class="fld'+(fd.full||fd.type==='textarea'?' full':'')+'"><label>'+esc(fd.label)
+      +(fd.req?' <b class="rq">*</b>':'')+'</label>'+control(fd,val==null?'':val,path)
+      +(fd.hint?'<small>'+esc(fd.hint)+'</small>':'')+'</div>';
+  }
+  /* Follow-up questions. A field marked `only:{f:'will',is:['Yes']}` appears
+     only once its parent has been answered that way — asking someone with no
+     will which country it was made in is what made the estate screen feel like
+     a maze. Answering the parent re-draws the screen. */
+  function shown(fields,vals){
+    return (fields||[]).filter(fd=>{
+      if(!fd.only) return true;
+      const v=String((vals||{})[fd.only.f]||'').trim();
+      return fd.only.is.some(x=>String(x)===v);
+    });
+  }
+  function grid(fields,vals,prefix){
+    return '<div class="fgrid">'+shown(fields,vals).map(fd=>fieldHtml(fd,(vals||{})[fd.id],prefix+'|'+fd.id)).join('')+'</div>';
+  }
+  function gates(fields){
+    const g={}; (fields||[]).forEach(fd=>{ if(fd.only) g[fd.only.f]=1; }); return g;
+  }
+  function rowsHtml(s){
+    const rows=D[s.id]||[];
+    let h='';
+    if(!rows.length) h+='<div class="none">Nothing to add here? That is fine — just press Continue.</div>';
+    rows.forEach((r,i)=>{
+      h+='<div class="rowcard"><div class="rowhead"><span>'+esc(CLIENT_COPY_T(s))+' '+(i+1)+'</span>'
+        +'<button type="button" class="rm" data-a="rm" data-s="'+s.id+'" data-i="'+i+'">Remove</button></div>'
+        +'<div class="fgrid">'+shown(s.cols,r).map(fd=>fieldHtml(fd,r[fd.id],'R|'+s.id+'|'+i+'|'+fd.id)).join('')+'</div></div>';
+    });
+    h+='<button type="button" class="btn ghost" data-a="add" data-s="'+s.id+'">+ Add '+(rows.length?'another':'one')+'</button>';
+    return h;
+  }
+  function CLIENT_COPY_T(s){ return (CTX.copy[s.id]||{}).t||s.name; }
+
+  function progress(){
+    const tot=steps().length+2;
+    const cur=Math.min(stepIx+2,tot);
+    return '<div class="prog"><i style="width:'+Math.round(cur/tot*100)+'%"></i></div>'
+      +'<div class="progtxt">Step '+cur+' of '+tot+'</div>';
+  }
+  function screenWelcome(){
+    return '<div class="hero">'+CTX.logoImg
+      +'<h1>Hello '+esc(CTX.greetName||CTX.firstName||'there')+'</h1>'
+      +'<p>'+esc(CTX.adviserName||'Your adviser')+' has asked you to complete your Fact Find before your meeting. '
+      +'It takes around 20 minutes, and your answers save on this device as you go — you can close this page '
+      +'and come back any time.</p>'
+      +'<p class="mut">Nothing is sent until the very last step, when you press the send button yourself.</p>'
+      +privacyPanel()
+      +'<div class="fld" style="margin:22px 0 6px"><label>Are you completing this with a partner?</label>'
+      +'<div class="seg"><button type="button" class="segb'+(joint?'':' on')+'" data-a="joint" data-v="0">Just me</button>'
+      +'<button type="button" class="segb'+(joint?' on':'')+'" data-a="joint" data-v="1">Me and my partner</button></div></div>'
+      +'<button type="button" class="btn big" data-a="next">'+(hasAny()?'Carry on where I left off':'Let’s begin')+'</button>'
+      +'<p class="tiny">Your reference: '+esc(CTX.ref)+' · '+esc(CTX.org)+'</p></div>';
+  }
+  /* Article 13 says this has to be given when the data is collected, so it
+     sits on the first screen and again above the send button \u2014 not
+     hidden behind a link to somewhere else. */
+  function privacyPanel(){
+    const N=CTX.privacy||[];
+    if(!N.length) return '';
+    return '<details class="privacy"><summary>How your information will be used</summary>'
+      +N.map(x=>'<h4>'+esc(x.h)+'</h4><p>'+esc(x.p)+'</p>').join('')
+      +'</details>';
+  }
+  function consentBox(id,text,checked){
+    return '<label class="consent"><input type="checkbox" id="'+id+'"'+(checked?' checked':'')+'>'
+      +'<span>'+esc(text)+'</span></label>';
+  }
+  /* Consent is only meaningful if it is recorded with WHAT they agreed to and
+     WHEN. Storing a bare true would be worthless as evidence. */
+  const consentState={main:false,health:false};
+  /* Health and smoker status are special category data, so they need explicit
+     consent of their own \u2014 and only if they actually answered. */
+  function hasHealth(){
+    const P=(D.personal||{});
+    return ['a1','a2'].some(w=>{ const o=P[w]||{};
+      return String(o.health||'').trim()||String(o.smoker||'').trim()||String(o.healthNotes||'').trim(); });
+  }
+  function consentRecord(){
+    const c=CTX.consent||{};
+    const out={agreedAt:new Date().toISOString(),
+      wording:c.main||'',version:c.version||'',
+      health:{given:!!consentState.health,wording:c.health||''}};
+    return out;
+  }
+  function wireConsent(btnId){
+    const gate=()=>{ const b=$('#'+btnId); if(b) b.disabled=!consentState.main; };
+    const a=$('#cAgree');
+    if(a) a.addEventListener('change',e=>{ consentState.main=e.target.checked; gate(); });
+    const hh=$('#cHealth');
+    if(hh) hh.addEventListener('change',e=>{ consentState.health=e.target.checked; });
+    gate();
+  }
+  function hasAny(){ try{ return !!localStorage.getItem(store); }catch(e){ return false; } }
+  function screenSection(s){
+    const cc=CTX.copy[s.id]||{};
+    let body='';
+    if(s.rows) body=rowsHtml(s);
+    else if(s.per==='applicant'){
+      body='<div class="whohead">You</div>'+grid(s.fields,(D[s.id]||{}).a1,s.id+'|a1');
+      if(joint) body+='<div class="whohead">Your partner</div>'+grid(s.fields,(D[s.id]||{}).a2,s.id+'|a2');
+    } else body=grid(s.fields,D[s.id],s.id+'|_');
+    return progress()
+      +'<h2>'+esc(cc.t||s.name)+'</h2>'
+      +(cc.d?'<p class="lead">'+esc(cc.d)+'</p>':'')
+      +body
+      +'<div class="navrow"><button type="button" class="btn ghost" data-a="back">Back</button>'
+      +'<button type="button" class="btn big" data-a="next">Continue</button></div>';
+  }
+  function missing(){
+    const out=[];
+    steps().forEach(s=>{
+      const req=f=>f.req;
+      if(s.rows) return;
+      const who=s.per==='applicant'?(joint?['a1','a2']:['a1']):[null];
+      who.forEach(w=>{
+        const vals=w?(D[s.id]||{})[w]:D[s.id];
+        shown(s.fields,vals).filter(req).forEach(fd=>{
+          if(!String((vals||{})[fd.id]||'').trim())
+            out.push((CTX.copy[s.id]||{}).t+(w==='a2'?' (partner)':'')+' — '+fd.label);
+        });
+      });
+    });
+    return out;
+  }
+  function screenReview(){
+    const miss=missing();
+    return progress()
+      +'<h2>Nearly done</h2>'
+      +(miss.length
+        ?'<p class="lead">A few things are still blank. You can go back and fill them, or send as it is and '
+          +esc(CTX.adviserName||'your adviser')+' will cover them with you.</p>'
+          +'<ul class="misslist">'+miss.slice(0,12).map(m=>'<li>'+esc(m)+'</li>').join('')
+          +(miss.length>12?'<li>… and '+(miss.length-12)+' more</li>':'')+'</ul>'
+        :'<p class="lead">Everything required is filled in. Thank you — this makes the meeting far more useful.</p>')
+      +'<div class="navrow"><button type="button" class="btn ghost" data-a="back">Back</button>'
+      +'<button type="button" class="btn big" data-a="gosend">Send my answers</button></div>';
+  }
+  async function encodeReply(){
+    const payload=JSON.stringify({v:1,ref:CTX.ref,name:CTX.clientName,joint,at:new Date().toISOString(),data:D});
+    try{
+      const cs=new CompressionStream('deflate-raw');
+      const stream=new Blob([new TextEncoder().encode(payload)]).stream().pipeThrough(cs);
+      const buf=new Uint8Array(await new Response(stream).arrayBuffer());
+      let s=''; for(let i=0;i<buf.length;i+=0x8000) s+=String.fromCharCode.apply(null,buf.subarray(i,Math.min(i+0x8000,buf.length)));
+      return 'SJB1.'+btoa(s);
+    }catch(e){
+      return 'SJB0.'+btoa(unescape(encodeURIComponent(payload)));
+    }
+  }
+  function wrap76(s){ return s.replace(/(.{76})/g,'$1\n'); }
+  function screenDone(){
+    return '<div class="hero">'+CTX.logoImg
+      +'<h1>Thank you</h1>'
+      +'<p>Your answers are on their way to '+esc(CTX.adviserName||'your adviser')+'. If the email did not send '
+      +'for any reason, your answers are still saved on this device — just open this file again.</p></div>';
+  }
+
+  function render(){
+    const root=$('#croot');
+    const st=steps();
+    if(stepIx<0){ root.innerHTML=screenWelcome(); return; }
+    if(stepIx<st.length){ root.innerHTML=screenSection(st[stepIx]); window.scrollTo(0,0); return; }
+    if(stepIx===st.length){ root.innerHTML=screenReview(); window.scrollTo(0,0); return; }
+    if(sent){ root.innerHTML=screenDone(); return; }
+    renderSend();
+  }
+  /* Hosted mode: the answers go straight to the server. No email, no code. */
+  async function renderSubmit(){
+    const root=$('#croot');
+    root.innerHTML='<div class="hero"><h2>Send it to '+esc(CTX.adviserName||'your adviser')+'</h2>'
+      +'<p class="lead">Press the button and your answers go securely to '+esc(CTX.org)+'. '
+      +'You can come back to this link and update anything until your meeting.</p>'
+      +privacyPanel()
+      +consentBox('cAgree',(CTX.consent||{}).main||'',consentState.main)
+      +(hasHealth()?consentBox('cHealth',(CTX.consent||{}).health||'',consentState.health):'')
+      +'<button type="button" class="btn big" id="submitBtn">Submit my Fact Find</button>'
+      +'<p class="mut" id="submitMsg" style="margin-top:14px"></p>'
+      +'<div class="navrow" style="justify-content:center"><button type="button" class="btn ghost" data-a="back">Back</button></div></div>';
+    wireConsent('submitBtn');
+    $('#submitBtn').addEventListener('click',async()=>{
+      const btn=$('#submitBtn'), msg=$('#submitMsg');
+      btn.disabled=true; btn.textContent='Sending…';
+      try{
+        const res=await fetch(CTX.submitUrl,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({data:D,joint,consent:consentRecord()})});
+        if(!res.ok){ const t=await res.text(); throw new Error(t||('Server said '+res.status)); }
+        sent=true; save();
+        root.innerHTML='<div class="hero">'+CTX.logoImg+'<h1>Thank you</h1>'
+          +'<p>Your Fact Find has reached '+esc(CTX.adviserName||'your adviser')+'. '
+          +'If you remember something later, open this same link and press Submit again.</p></div>';
+      }catch(e){
+        btn.disabled=false; btn.textContent='Try again';
+        msg.textContent='That did not go through — '+(e.message||'please check your connection and try again')+'. Your answers are still saved on this device.';
+      }
+    });
+  }
+  async function renderSend(){
+    if(CTX.submitUrl) return renderSubmit();
+    const root=$('#croot');
+    const code=wrap76(await encodeReply());
+    const subject='['+CTX.ref+'] Completed Fact Find — '+CTX.clientName;
+    const full='--- FACT FIND REPLY — do not edit below this line ---\n'+code+'\n--- end ---';
+    const greeting='Hi '+(CTX.adviserName||'')+',\n\nMy completed Fact Find is below.\n\n';
+    /* Put the answers straight into the email when they fit: most do, and
+       then the client has nothing to paste. Windows caps a mailto: address
+       around 2,000 characters, so over that we fall back to copy-and-paste. */
+    const withCode='mailto:'+encodeURIComponent(CTX.adviserEmail)
+      +'?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(greeting+full+'\n');
+    const inline=withCode.length<1900;
+    const mail=inline?withCode:'mailto:'+encodeURIComponent(CTX.adviserEmail)
+      +'?subject='+encodeURIComponent(subject)
+      +'&body='+encodeURIComponent('Hi '+(CTX.adviserName||'')+',\n\nMy completed Fact Find code is pasted below this line:\n\n');
+    root.innerHTML='<div class="hero"><h2>Send it back</h2>'
+      +(inline
+        ?'<p class="lead">Press the button — it opens an email to '+esc(CTX.adviserName||'your adviser')
+          +' with your answers <b>already in it</b>. All you need to do is press Send.</p>'
+          +'<button type="button" class="btn big" id="sendBtn">Open the email — answers included</button>'
+          +'<p class="mut" style="margin-top:14px">The email looks blank apart from a block of letters and numbers — that is your answers, safely packed up.</p>'
+        :'<p class="lead">Press the button — it copies your answers and opens an email to '
+          +esc(CTX.adviserName||'your adviser')+'. Then <b>paste into the email</b> (Ctrl+V, or press and hold on a phone) and press send.</p>'
+          +'<button type="button" class="btn big" id="sendBtn">Copy my answers &amp; open the email</button>')
+      +'<p class="mut" style="margin-top:16px">If nothing opens, copy the code below yourself and email it to '
+      +'<b>'+esc(CTX.adviserEmail)+'</b>.</p>'
+      +'<textarea class="inp ta code" readonly rows="7"></textarea>'
+      +privacyPanel()
+      +consentBox('cAgree',(CTX.consent||{}).main||'',consentState.main)
+      +(hasHealth()?consentBox('cHealth',(CTX.consent||{}).health||'',consentState.health):'')
+      +'<button type="button" class="btn ghost" id="dlBtn">Save my answers as a file instead</button>'
+      +'<div class="navrow" style="justify-content:center"><button type="button" class="btn ghost" data-a="back">Back</button></div></div>';
+    $('.code').value=full;
+    wireConsent('sendBtn');
+    $('#sendBtn').addEventListener('click',async()=>{
+      try{ await navigator.clipboard.writeText(full); }
+      catch(e){ const ta=$('.code'); ta.focus(); ta.select(); try{ document.execCommand('copy'); }catch(_){}}
+      sent=true; save();
+      window.location.href=mail;
+      setTimeout(render,900);
+    });
+    $('#dlBtn').addEventListener('click',()=>{
+      const b=new Blob([full],{type:'text/plain'});
+      const u=URL.createObjectURL(b), a=document.createElement('a');
+      a.href=u; a.download='FactFind-Reply-'+CTX.ref+'.txt'; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),1500);
+    });
+  }
+
+  document.addEventListener('input',e=>{
+    const p=e.target.dataset&&e.target.dataset.p; if(!p) return;
+    const parts=p.split('|');
+    let sec,fld;
+    if(parts[0]==='R'){ const s=parts[1],i=+parts[2],f=parts[3]; sec=s; fld=f;
+      if(D[s]&&D[s][i]) D[s][i][f]=e.target.value; }
+    else { const s=parts[0],w=parts[1],f=parts[2]; sec=s; fld=f;
+      if(w==='_'){ D[s]=D[s]||{}; D[s][f]=e.target.value; }
+      else { D[s]=D[s]||{a1:{},a2:{}}; D[s][w]=D[s][w]||{}; D[s][w][f]=e.target.value; } }
+    save();
+    /* If that answer decides whether other questions apply, show them now.
+       Only ever off a dropdown — re-drawing mid-sentence would steal focus. */
+    const s2=steps()[stepIx];
+    if(e.target.tagName==='SELECT'&&s2&&s2.id===sec&&gates(s2.rows?s2.cols:s2.fields)[fld]) render();
+  });
+  document.addEventListener('click',e=>{
+    const el=e.target.closest('[data-a]'); if(!el) return;
+    const a=el.dataset.a;
+    if(a==='joint'){ joint=el.dataset.v==='1'; save(); render(); }
+    else if(a==='next'){ stepIx++; save(); if(stepIx>steps().length){ renderSend(); } else render(); }
+    else if(a==='back'){ stepIx=Math.max(-1,stepIx-1); save(); render(); }
+    else if(a==='gosend'){ stepIx=steps().length+1; save(); renderSend(); }
+    else if(a==='add'){ const s=el.dataset.s; D[s]=D[s]||[]; D[s].push({}); save(); render(); }
+    else if(a==='rm'){ const s=el.dataset.s; D[s].splice(+el.dataset.i,1); save(); render(); }
+  });
+  render();
+}
+
+/* ------------------------- generated-file assembly ---------------------- */
+function clientPageCSS(){
+  /* carry the brand font across from this page's own stylesheet */
+  const st=document.querySelector('style');
+  const ff=(st&&st.textContent.match(/@font-face\{[\s\S]*?\}/))?st.textContent.match(/@font-face\{[\s\S]*?\}/)[0]:'';
+  return ff+`
+:root{--or:#F47920;--ord:#D2620F;--ch:#1D2E38;--ink:#16242C;--ink3:#67787F;--line:#E2E8EB;--bg:#F4F6F8}
+*{box-sizing:border-box}body{margin:0;font-family:'Manrope','Segoe UI',system-ui,sans-serif;background:var(--bg);
+color:var(--ink);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:660px;margin:0 auto;padding:20px 16px 80px}
+.head{display:flex;align-items:center;gap:10px;padding:14px 0;border-bottom:1px solid var(--line);margin-bottom:18px}
+.head img{height:26px}.head .hn{font-weight:800;font-size:14px}.head .hr2{margin-left:auto;font-size:11px;color:var(--ink3)}
+h1{font-size:26px;margin:14px 0 10px;letter-spacing:-.02em}h2{font-size:21px;margin:12px 0 6px;letter-spacing:-.02em}
+p{margin:8px 0}.lead{color:#41525C}.mut{color:var(--ink3);font-size:13px}.tiny{font-size:11.5px;color:#93A3AA;margin-top:18px}
+.hero{text-align:center;padding-top:26px}.hero img{height:34px;margin-bottom:18px}
+.prog{height:6px;background:#E6EBEE;border-radius:6px;overflow:hidden;margin:6px 0 4px}
+.prog i{display:block;height:100%;background:var(--or);border-radius:6px;transition:width .3s}
+.progtxt{font-size:11.5px;color:var(--ink3);margin-bottom:14px}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;margin:14px 0}
+@media(max-width:560px){.fgrid{grid-template-columns:1fr}}
+.fld{display:flex;flex-direction:column;gap:5px}.fld.full{grid-column:1/-1}
+.fld label{font-size:12px;font-weight:700;color:#41525C}.fld small{color:#93A3AA;font-size:11.5px}
+.rq{color:var(--or)}
+.inp{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font:inherit;background:#fff}
+.inp:focus{outline:none;border-color:#1D75BD;box-shadow:0 0 0 3px #EAF4FC}
+.ta{resize:vertical;min-height:74px}
+.btn{display:inline-block;padding:12px 22px;border-radius:11px;border:0;background:var(--or);color:#fff;
+font:inherit;font-weight:800;cursor:pointer}
+.btn:hover{background:var(--ord)}.btn.big{width:100%;max-width:340px;padding:14px 22px;font-size:16px;margin-top:14px}
+.btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);font-weight:700}
+.btn.ghost:hover{background:#F0F3F5}
+.navrow{display:flex;justify-content:space-between;gap:10px;margin-top:22px}
+.whohead{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#93A3AA;margin:20px 0 2px}
+.privacy{border:1px solid var(--line);border-radius:12px;background:#fff;padding:0 14px;margin:16px 0;text-align:left}
+.privacy summary{cursor:pointer;padding:13px 0;font-weight:700;font-size:14.5px}
+.privacy h4{margin:12px 0 3px;font-size:13.5px}
+.privacy p{margin:0 0 10px;font-size:13px;line-height:1.6;color:#41525C}
+.consent{display:flex;gap:10px;align-items:flex-start;text-align:left;border:1px solid var(--line);
+  border-radius:12px;background:#fff;padding:13px 14px;margin:10px 0;font-size:13.5px;line-height:1.55;cursor:pointer}
+.consent input{margin-top:2px;flex:0 0 auto;width:18px;height:18px}
+.btn.big:disabled{opacity:.45;cursor:not-allowed}
+.rowcard{border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0;background:#fff}
+.rowhead{display:flex;justify-content:space-between;font-weight:800;font-size:13px}
+.rm{border:0;background:none;color:#C0392B;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.none{color:var(--ink3);font-size:13.5px;padding:10px 0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:#fff}
+.segb{padding:10px 18px;border:0;background:none;font:inherit;font-weight:700;cursor:pointer;color:var(--ink3)}
+.segb.on{background:var(--ch);color:#fff}
+.misslist{text-align:left;max-width:420px;margin:10px auto;color:#8A5608;font-size:13px}
+.code{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;margin:12px 0;word-break:break-all}
+@media (prefers-color-scheme:dark){body{background:#F4F6F8}}`;
+}
+function buildClientPage(c){
+  const p=(c.data.personal||{}).a1||{};
+  const p2=(c.data.personal||{}).a2||{};
+  const secs=CLIENT_SECTION_IDS.map(id=>{ const s=sectionById(id);
+    return {id:s.id,name:s.name,rows:s.rows?1:0,per:s.per||null,
+      fields:s.fields?clientFields(s.fields):null,
+      cols:s.cols?clientFields(s.cols):null}; });
+  const listsUsed={};
+  const collect=f=>{ if(f&&typeof f.list==='string'&&f.list!=='currency') listsUsed[f.list]=listFor(f.list); };
+  secs.forEach(s=>{ (s.fields||[]).forEach(collect); (s.cols||[]).forEach(collect); });
+  const ctx={
+    org:CFG.org, ref:c.ref, clientName:clientName(c),
+    firstName:p.firstName||'', greetName:[p.firstName,p2.firstName].filter(Boolean).join(' and '), joint:hasApplicant2(c),
+    adviserName:c.data.meta.adviser||DB.settings.adviserName||'',
+    adviserEmail:c.data.meta.adviserEmail||DB.settings.adviserEmail||'',
+    sections:secs, copy:CLIENT_COPY, lists:listsUsed, currencies:CURRENCIES,
+    privacy:privacyNotice(DB.settings,'factfind'),
+    consent:{main:DP_CONSENT.factfind,health:DP_CONSENT.health,version:dpVersion()},
+    logoImg:logo(30), data:clientSubsetData(c)
+  };
+  const ctxJson=JSON.stringify(ctx).replace(/</g,'\\u003c');
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    +'<meta name="viewport" content="width=device-width,initial-scale=1">'
+    +'<title>Your Fact Find — '+esc(CFG.org)+'</title>'
+    +'<style>'+clientPageCSS()+'</style></head><body>'
+    +'<div class="wrap"><div class="head">'+logo(24)
+    +'<span class="hn">'+esc(CFG.org)+'</span><span class="hr2">'+esc(c.ref)+'</span></div>'
+    +'<div id="croot"></div></div>'
+    +'<script>\nvar CLIENT_COPY='+JSON.stringify(CLIENT_COPY).replace(/</g,'\\u003c')+';\n'
+    +'('+SJB_CLIENT_APP.toString()+')('+ctxJson+');\n<\/script></body></html>';
+}
+async function downloadClientPage(c){
+  const html=buildClientPage(c);
+  const nm='SJB Fact Find - '+clientName(c).replace(/[\\/:*?"<>|]/g,'')+'.html';
+  /* On the published page a script-started download is inert; the runtime's
+     own download channel is the only way to hand the file over — and it may
+     refuse .html, in which case be straight about the desktop copy. */
+  if(window.claude){
+    const dl=await downloads();
+    if(dl){
+      try{ await dl.save({filename:nm,data:html}); return nm; }
+      catch(e){
+        if(e&&e.code==='declined'){ toast('Cancelled','No form was saved.','warn'); return null; }
+        toast('The published page cannot save the form',
+          'Open the desktop copy ('+CFG.localFile+') to send Fact Finds — the form downloads normally there.','warn',9000);
+        return null;
+      }
+    }
+    toast('The published page cannot save the form',
+      'Open the desktop copy ('+CFG.localFile+') to send Fact Finds — the form downloads normally there.','warn',9000);
+    return null;
+  }
+  const b=new Blob([html],{type:'text/html'});
+  const u=URL.createObjectURL(b), a=document.createElement('a');
+  a.href=u; a.download=nm; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(u),2000);
+  return nm;
+}
+
+/* ----------------------------- reply import ----------------------------- */
+async function decodeReply(text){
+  const m=/SJB([01])\.([A-Za-z0-9+/=\s]+)/.exec(text);
+  if(!m) throw new Error('No reply code found. Paste the whole block between the two “---” lines.');
+  const b64=m[2].replace(/\s+/g,'');
+  const bin=atob(b64);
+  if(m[1]==='0'){ return JSON.parse(decodeURIComponent(escape(bin))); }
+  const bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  const txt=TD.decode(await inflateRaw(bytes));
+  return JSON.parse(txt);
+}
+function applyReply(c,payload){
+  /* Keep the evidence, not just the fact: what they agreed to and when. */
+  if(payload.consent) c.consent=payload.consent;
+  const summary=[];
+  CLIENT_SECTION_IDS.forEach(id=>{
+    const inc=payload.data&&payload.data[id]; if(inc==null) return;
+    const s=sectionById(id); if(!s) return;
+    if(s.rows){
+      if(Array.isArray(inc)&&inc.length){
+        /* Merge, never replace. The client's copy no longer carries the
+           transfer value, the CETV, the exit fee or the ceding-scheme
+           answers, so rebuilding the table from their reply would throw away
+           everything the adviser had already put in. Existing entries are
+           matched on their policy number or name and updated in place. */
+        const cols=s.cols||[];
+        const keyCol=['policyNo','name','lender','bank','provider','address','scheme']
+          .find(k=>cols.some(x=>x.id===k)) || (cols.find(x=>x.req)||{}).id;
+        const norm=v=>String(v==null?'':v).toLowerCase().replace(/[^a-z0-9]/g,'');
+        const had=(c.data[id]||[]).slice();
+        const claimed=new Set();
+        const out=[];
+        inc.forEach(r=>{
+          let row=null;
+          if(keyCol&&norm(r[keyCol])){
+            const at=had.findIndex((e,i)=>!claimed.has(i)&&norm(e[keyCol])===norm(r[keyCol]));
+            if(at>=0){ row=had[at]; claimed.add(at); }
+          }
+          if(!row) row={_id:uid('r')};
+          clientFields(cols).forEach(fd=>{
+            if(r[fd.id]!=null&&String(r[fd.id]).trim()!=='') row[fd.id]=r[fd.id];
+          });
+          out.push(row);
+        });
+        /* Anything they did not mention is left alone rather than deleted —
+           it may be an entry only we know about. */
+        let kept=0;
+        had.forEach((e,i)=>{ if(!claimed.has(i)&&out.indexOf(e)<0){ out.push(e); kept++; } });
+        c.data[id]=out;
+        summary.push(s.name+': '+inc.length+' entr'+(inc.length===1?'y':'ies')
+          +(kept?', '+kept+' of yours kept':''));
+      }
+      return;
+    }
+    let n=0;
+    const mergeInto=(dst,src)=>{ if(!src) return;
+      clientFields(s.fields).forEach(fd=>{ const v=src[fd.id];
+        if(v!=null&&String(v).trim()!==''&&String(v)!==String(dst[fd.id]||'')){ dst[fd.id]=v; n++; } }); };
+    if(s.per==='applicant'){
+      c.data[id]=c.data[id]||{a1:{},a2:{}};
+      mergeInto(c.data[id].a1,inc.a1); mergeInto(c.data[id].a2,inc.a2);
+    } else { c.data[id]=c.data[id]||{}; mergeInto(c.data[id],inc); }
+    if(n) summary.push(s.name+': '+n+' answer'+(n===1?'':'s'));
+  });
+  c.status='Fact Find returned';
+  touch(c); save(true);
+  return summary;
+}

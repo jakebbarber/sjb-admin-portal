@@ -1,0 +1,25 @@
+{
+  "name": "rwl-review",
+  "version": "1.0.0",
+  "description": "RWL Review: pre-check Reason Why Letters against the network compliance rubric and turn compliance emails into tracked changes",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/make_fixture.cjs && node test/engine.test.mjs && npm run test:merge",
+    "test:merge": "node test/make_template.cjs && node test/merge.test.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "docx": "^9.10.0",
+    "fflate": "^0.8.3"
+  },
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  }
+}

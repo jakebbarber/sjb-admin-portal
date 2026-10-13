@@ -1,0 +1,114 @@
+<!doctype html><meta charset="utf-8"><title>learning and feedback test</title>
+<script>
+window.__runLearn=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const NL=String.fromCharCode(10);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+    DB.settings.schemeRules=[]; DB.settings.feedback=[];
+
+    /* A provider whose wording the reader has never seen. "Pot value today"
+       is not in any built-in pattern, so it should be missed at first. */
+    const doc=['ACME PENSIONS — scheme information',
+      'Plan reference: ACME-4471',
+      'Pot value today: 51,240.66',
+      'Wind-up charge: 2.5% before age 60',
+      'Guarantees: None on this contract'].join(NL);
+    const d1={lines:doc.split(NL),tables:[],kind:'PDF'};
+    const before=extractScheme(d1);
+    say('--- first time this provider is seen ---');
+    say('    found: '+Object.keys(before).join(', '));
+    ok(before.value===undefined,'    "Pot value today" is not understood yet');
+
+    /* The adviser puts it right on the review screen. */
+    say('--- the adviser corrects it ---');
+    const rows=SCHEME_FIELDS.filter(x=>x.id!=='dcReco').map(x=>{
+      const g=before[x.id];
+      return {id:x.id,value:g?g.value:null,where:g?g.where:'',use:!!g&&!g.weak,
+        weak:!!(g&&g.weak),label:g?g.label:null,proposed:g?g.value:null};
+    });
+    const vRow=rows.find(r=>r.id==='value');
+    vRow.value='51240.66'; vRow.use=true;             /* typed in by hand */
+    const taught=learnFromReview({rows:rows,text:doc});
+    say('    rules learned: '+taught);
+    say('    '+learnedRules().map(r=>'"'+r.label+'" '+(r.kind==='never'?'is NOT':'means')+' '+r.field).join(' · '));
+    ok(taught>=1,'    something was learned from the correction');
+
+    /* The same provider, a different client. */
+    say('--- the next document from that provider ---');
+    const doc2=['ACME PENSIONS — scheme information',
+      'Plan reference: ACME-9902',
+      'Pot value today: 88,415.10',
+      'Guarantees: None on this contract'].join(NL);
+    const after=extractScheme({lines:doc2.split(NL),tables:[],kind:'PDF'});
+    say('    found: '+Object.keys(after).join(', '));
+    ok(after.value&&Math.abs(after.value.value-88415.10)<0.01,
+       '    it now reads the value by itself: '+(after.value?after.value.value:'—'));
+
+    /* Rejecting a wrong answer teaches the opposite. */
+    say('--- rejecting a wrong answer ---');
+    const rows2=[{id:'guarantees',value:'None on this contract',proposed:'None on this contract',
+      use:false,label:'Wind-up charge'}];
+    const taught2=learnFromReview({rows:rows2,text:doc});
+    ok(taught2>=1,'    the rejection was learned');
+    ok(learnedRules().some(r=>r.kind==='never'&&r.field==='guarantees'),'    stored as a "never" rule');
+    const fdG=SCHEME_FIELDS.find(f=>f.id==='guarantees');
+    ok(looksLikeLabel(fdG,'Wind-up charge')===false,'    that label no longer counts as guarantees');
+
+    /* Rules survive a round trip to the server. */
+    say('--- rules are practice-wide ---');
+    save(true); await new Promise(r=>setTimeout(r,500));
+    const st=await api('GET','/api/state');
+    const saved=(st.settings&&st.settings.schemeRules)||[];
+    ok(saved.length===learnedRules().length,'    '+saved.length+' rules stored on the server for everyone');
+
+    /* Forgetting one. */
+    const n0=learnedRules().length;
+    const r0=learnedRules()[0];
+    ACT.learnDel(ruleKey(r0.label)+'|'+r0.field+'|'+r0.kind);
+    ok(learnedRules().length===n0-1,'    a rule can be forgotten');
+
+    /* ---------------- feedback ---------------- */
+    say('--- feedback from anywhere in the portal ---');
+    const c=blankClient();
+    c.data.personal.a1={firstName:'Feedback',surname:'Case'};
+    DB.clients.unshift(c); save(true); await new Promise(r=>setTimeout(r,300));
+    S.clientId=c.id; S.screen='client'; S.section='recommendation';
+    ok(topHTML().indexOf('data-a="fbOpen"')>=0,'    the button is in the top bar on every screen');
+    ok(railHTML().indexOf('data-v="feedback"')>=0,'    Feedback has a place on the rail');
+    ACT.fbOpen();
+    ok(!!document.querySelector('#fbText'),'    the note dialog opens');
+    say('    it recorded where you were: '+feedbackWhere());
+    document.querySelector('#fbText').value='The transfer value read ten times too big.';
+    ACT.fbSave();
+    const all=feedbackAll();
+    ok(all.length===1,'    the note was kept');
+    ok(all[0].where.indexOf('Recommendation')>=0,'    with the screen and section');
+    ok(all[0].build===BUILD,'    and the build it happened on');
+    ok(feedbackOpen()===1,'    it counts as outstanding');
+    ACT.fbMark(all[0].id+'|done');
+    ok(feedbackOpen()===0,'    marking it done clears the count');
+    S.screen='feedback'; render();
+    ok(document.querySelector('.page').innerText.indexOf('ten times too big')>=0,'    it shows on the Feedback screen');
+    save(true); await new Promise(r=>setTimeout(r,500));
+    const st2=await api('GET','/api/state');
+    ok(((st2.settings&&st2.settings.feedback)||[]).length===1,'    and reaches the server for other advisers');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L.join(NL);
+};
+</script>

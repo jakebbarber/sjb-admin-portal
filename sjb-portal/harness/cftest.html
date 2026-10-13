@@ -1,0 +1,473 @@
+<!doctype html><meta charset="utf-8"><title>cashflow maths test</title>
+<script>
+/* The cashflow engine, checked against arithmetic we can do by hand.
+   Fictional client throughout. Every figure before tax. */
+window.__runCf=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const near=(a,b,tol,w)=>ok(Math.abs(a-b)<=tol,w+'  ('+Math.round(a)+' vs '+Math.round(b)+')');
+  const NL=String.fromCharCode(10);
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  try{
+    /* ---------------- the tax engine is gone ---------------- */
+    say('--- no tax engine ---');
+    ['cfTaxOn','cfTaxDetail','cfGrossUp','cfRegime','CF_TAX','taxLibModal','parseTaxFile','cfTreatFor','CF_TREAT']
+      .forEach(n=>ok(typeof window[n]==='undefined','  '+n+' no longer exists'));
+    ok(CF_DEFAULTS.taxOn===undefined&&CF_DEFAULTS.regime===undefined&&CF_DEFAULTS.pclsAge===undefined,
+       '  and the defaults carry no tax settings');
+
+    /* ---------------- a client to project ---------------- */
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    c.data.personal.a1={firstName:'Test',surname:'Case',dob:'1976-06-01'};
+    c.data.retirement={a1:{retireAge:65,desiredIncome:40000,incomeCcy:'GBP'},a2:{}};
+    c.data.employment={a1:{salary:80000,salaryCcy:'GBP'},a2:{}};
+    c.data.dcPensions=[{_id:'p1',name:'Aviva',owner:'Applicant 1',value:400000,ccy:'GBP',nmpa:57}];
+    c.data.cash=[{_id:'k1',bank:'Barclays',owner:'Applicant 1',amount:50000,ccy:'GBP'}];
+    c.data.incomeExp={expTotal:45000};
+    DB.clients.unshift(c);
+    const S0=Object.assign({},CF_DEFAULTS,{feePlatform:0,feeOcf:0,feeAdviser:0,
+      basis:'steady',inflation:0,salaryGrowth:0,growCash:0,growInvest:0,growPension:0,endAge:90});
+
+    /* ---------------- the year-by-year arithmetic ---------------- */
+    say('--- one year, by hand ---');
+    const plain=cfRun(c,S0,false);
+    ok(!!plain&&plain.rows.length>0,'  a projection was produced');
+    const y0=plain.rows[0];
+    near(y0.income,80000,0.01,'  income in year one is the salary');
+    near(y0.srcInc.sal_a1,80000,0.01,'  and it is recorded against its source');
+    near(y0.expenses,45000,0.01,'  expenses are the living costs');
+    near(y0.net,35000,0.01,'  the surplus is the difference');
+    ok(y0.drawn===0&&y0.shortfall===0,'  nothing drawn, no shortfall');
+    near(y0.cash,85000,0.01,'  the surplus lands in cash: 50,000 + 35,000');
+    near(y0.potVal.cash0,85000,0.01,'  and the cash pot is recorded by id');
+    near(y0.pension,400000,0.01,'  the pension is untouched');
+    ok(plain.sources.length===1&&plain.sources[0].id==='sal_a1','  one income source, the salary');
+    ok(plain.potList.length===2,'  two pots listed for the chart');
+
+    /* ---------------- today's money ---------------- */
+    say('--- today’s money ---');
+    ok(CF_DEFAULTS.realTerms===0,'  future money is the default — figures rise with inflation (Dion, 25 Sep)');
+    const nomI=cfRun(c,Object.assign({},S0,{inflation:2.5,realTerms:0}),false);
+    const realI=cfRun(c,Object.assign({},S0,{inflation:2.5,realTerms:1}),false);
+    near(nomI.rows[10].expenses,45000*Math.pow(1.025,10),1,'  in future money, living costs climb with inflation');
+    near(realI.rows[10].expenses,45000,1,'  in today’s money they stay flat');
+    near(realI.rows[10].total*Math.pow(1.025,10),nomI.rows[10].total,1,'  and the savings are the same figure, deflated');
+    near(realI.rows[10].potVal.cash0*Math.pow(1.025,10),nomI.rows[10].potVal.cash0,1,'  pot by pot');
+    ok(realI.shortfallYear===nomI.shortfallYear,'  the year the money runs out does not change');
+    near(realI.startTotal,nomI.startTotal,0.01,'  and today’s figure is today’s figure either way');
+    ok(realI.realTerms===true&&nomI.realTerms===false,'  the result says which it is');
+
+    /* ---------------- the draw order without tax ---------------- */
+    say('--- cash first, then investments, then pensions ---');
+    c.data.investments=[{_id:'i1',provider:'ISA',owner:'Applicant 1',value:100000,ccy:'GBP'}];
+    const ret=cfRun(c,S0,false);
+    const firstDraw=ret.rows.find(r=>r.drawn>0);
+    ok(!!firstDraw,'  the plan draws on savings after retirement');
+    if(firstDraw){
+      say('    first drawdown year '+firstDraw.year+' (age '+firstDraw.ages.a1+'): drew '+Math.round(firstDraw.drawn));
+      ok(firstDraw.ages.a1===65,'  starting the year they retire');
+      near(firstDraw.expenses,40000,0.01,'  spending the desired retirement income');
+      near(firstDraw.drawn,40000,0.01,'  the whole 40,000 comes from savings — no income yet');
+      const before=ret.rows[firstDraw.t-1];
+      near(before.cash-firstDraw.cash,40000,0.01,'  and it comes out of cash');
+      near(before.invest,firstDraw.invest,0.01,'  the ISA is not touched while there is cash');
+      near(before.pension,firstDraw.pension,0.01,'  nor the pension');
+    }
+    /* run the cash out and watch the order continue */
+    const cashOut=ret.rows.find(r=>r.drawn>0&&r.cash<1);
+    ok(!!cashOut,'  eventually the cash is gone');
+    if(cashOut){
+      const nxt=ret.rows[cashOut.t+1];
+      ok(nxt&&nxt.invest<cashOut.invest,'  then the investments are drawn');
+      ok(nxt&&Math.abs(nxt.pension-cashOut.pension)<0.01||!nxt,'  and the pension still waits its turn');
+    }
+    const invOut=ret.rows.find(r=>r.drawn>0&&r.cash<1&&r.invest<1);
+    ok(!!invOut,'  the investments run out too');
+    if(invOut){ const nxt=ret.rows[invOut.t+1];
+      ok(nxt&&nxt.pension<invOut.pension,'  and only then is the pension drawn'); }
+    ok(ret.rows.every(r=>r.drawn<=r.expenses+0.01),'  never drawing more than is needed');
+
+    /* the pension cannot be touched before its access age */
+    say('--- access age ---');
+    const early=blankClient();
+    early.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    early.data.personal.a1={firstName:'Early',surname:'Bird',dob:'1980-01-01'};
+    early.data.retirement={a1:{retireAge:50,desiredIncome:30000,incomeCcy:'GBP'},a2:{}};
+    early.data.dcPensions=[{_id:'e1',name:'SIPP',owner:'Applicant 1',value:500000,ccy:'GBP',nmpa:57}];
+    early.data.cash=[{_id:'e2',bank:'Bank',owner:'Applicant 1',amount:20000,ccy:'GBP'}];
+    early.data.incomeExp={expTotal:30000};
+    DB.clients.unshift(early);
+    const er=cfRun(early,Object.assign({},S0,{endAge:70}),false);
+    const at55=er.rows.find(r=>r.ages.a1===55);
+    ok(at55&&at55.shortfall>0,'  retiring at 50 with the pension locked to 57 produces a shortfall');
+    near(at55.pension,500000,0.01,'  because the pension cannot be touched yet');
+    const at58=er.rows.find(r=>r.ages.a1===58);
+    ok(at58&&at58.pension<500000&&at58.shortfall===0,'  from 57 the pension is drawn and the shortfall stops');
+    ok(er.shortfallYear===er.rows.find(r=>r.shortfall>0).year,'  the first shortfall year is reported');
+    /* the accumulated shortfall for the chart */
+    const defRows=er.rows.filter(r=>r.shortfall>0);
+    const sumShort=defRows.reduce((a,r)=>a+r.shortfall,0);
+    near(er.rows[er.rows.length-1].deficit,sumShort,0.01,'  the deficit accumulates every shortfall');
+    near(er.totalShortfall,sumShort,0.01,'  and is reported as a total');
+    ok(defRows.every((r,i)=>i===0||r.deficit>=defRows[i-1].deficit),'  and never goes down');
+
+    /* "it runs out but he still has his pension" — the plan has to say why */
+    say('--- a shortfall with money still locked away ---');
+    const lockRow=er.rows.find(r=>r.shortfall>0);
+    ok(lockRow.locked.length===1&&/SIPP/.test(lockRow.locked[0].label)&&lockRow.locked[0].until===57,'  the shortfall year records the SIPP as locked until 57');
+    ok(lockRow.locked[0].yearsAway===57-lockRow.ages.a1&&lockRow.locked[0].owner==='Early','  with how many years away, and whose it is');
+    ok(lockRow.locked[0].value>400000,'  and how much is sitting in it');
+    const cleared=er.rows.find(r=>r.ages.a1===58);
+    ok(cleared.locked.length===0&&cleared.shortfall===0,'  once it unlocks there is nothing locked and no shortfall');
+    S.clientId=early.id; S.screen='cashflow'; S.cfTab='chart'; render();
+    const pg0=document.querySelector('.page').innerText;
+    ok(/starts while there is still money in the plan/i.test(pg0),'  the screen says the shortfall starts with money still in the plan');
+    ok(/SIPP.*cannot be drawn until Early is 57/.test(pg0),'  naming the pot, the owner and the age');
+    ok(/Accessible from age/.test(pg0),'  and points at the fix');
+    S.cfTab='yearly'; render();
+    ok(/locked/.test(document.querySelector('.page').innerText),'  the yearly table marks the locked years');
+    S.cfTab='pots'; S.cfPot=null; render(); ACT.cfPot('pen0');
+    ok(!!document.querySelector('[data-cf="access_pen0"]'),'  the pension has an "Accessible from age" box');
+    /* he is 46 now with no salary, so the gap opens at once; an access age
+       below his age lifts the lock. With no growth, 500k at 30k a year still
+       runs dry in the end — but many years later, and never because anything
+       was locked */
+    const unlocked=cfRun(early,Object.assign({},S0,{endAge:70,access:{pen0:40}}),false);
+    ok(unlocked.shortfallYear>er.shortfallYear+8&&unlocked.rows.every(r=>!r.locked.length),
+       '  setting it to 40 lifts the lock: the money lasts years longer and nothing is ever locked ('+er.shortfallYear+' → '+unlocked.shortfallYear+')');
+    ok(cfRun(early,Object.assign({},S0,{endAge:70,access:{pen0:''}}),false).shortfallYear===er.shortfallYear,'  and blank falls back to the Fact Find age');
+    /* a pension whose owner has no date of birth */
+    const orphan=blankClient();
+    orphan.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    orphan.data.personal.a1={firstName:'Own',surname:'Er',dob:'1966-01-01'};
+    orphan.data.personal.a2={firstName:'Partner',surname:'Er'};          /* no date of birth */
+    orphan.data.retirement={a1:{retireAge:60,desiredIncome:30000,incomeCcy:'GBP'},a2:{}};
+    orphan.data.dcPensions=[{_id:'o1',name:'Partner SIPP',owner:'Applicant 2',value:500000,ccy:'GBP',nmpa:57}];
+    orphan.data.cash=[{_id:'o2',bank:'Bank',owner:'Applicant 1',amount:5000,ccy:'GBP'}];
+    orphan.data.incomeExp={expTotal:30000};
+    DB.clients.unshift(orphan);
+    const orun=cfRun(orphan,Object.assign({},S0,{endAge:75}),false);
+    ok(orun.people.length===1,'  only one applicant has a date of birth');
+    ok(orun.shortfallYear==null,'  yet a pension owned by the other is still drawn, not locked for ever');
+    ok(orun.rows[orun.rows.length-1].pension<500000,'  (it has been spent from)');
+
+    /* ---------------- charges ---------------- */
+    say('--- charges ---');
+    c.data.investments=[];
+    const G=Object.assign({},S0,{growInvest:5,growPension:5,growCash:1});
+    const noFee=cfRun(c,G,false);
+    const withFee=cfRun(c,Object.assign({},G,{feePlatform:0.34,feeOcf:0.30,feeAdviser:1.0}),false);
+    ok(!!noFee&&!!withFee,'  both runs produced a projection');
+    say('    end with no charges: '+Math.round(noFee.endTotal)+'   with 1.64%: '+Math.round(withFee.endTotal));
+    ok(withFee.endTotal<noFee.endTotal,'  charges reduce the outcome');
+    near(cfFeePct({feePlatform:0.34,feeOcf:0.30,feeAdviser:1.0}),1.64,0.001,'  total charge adds up');
+    /* 5% growth less 1% fee = 4% net on a pension that is not being touched */
+    const one=cfRun(c,Object.assign({},S0,{growPension:5,feeAdviser:1,endAge:52}),false);
+    near(one.rows[0].pension,400000*1.04,1,'  5% growth less 1% charges = 4% on the pension');
+    near(one.rows[1].pension,400000*1.04*1.04,1,'  compounding year on year');
+
+    /* ---------------- correlated returns ---------------- */
+    say('--- market shocks hit every pot at once ---');
+    const many=Object.assign({},S0,{growInvest:5,growPension:5,vol:15});
+    c.data.investments=[{_id:'i1',provider:'ISA',owner:'Applicant 1',value:100000,ccy:'GBP'}];
+    const spread=[];
+    for(let i=0;i<60;i++){ const r=cfRun(c,many,true,500+i*131); spread.push(r.rows[3].total); }
+    const mean=spread.reduce((a,b)=>a+b,0)/spread.length;
+    const sd=Math.sqrt(spread.reduce((a,b)=>a+(b-mean)*(b-mean),0)/spread.length);
+    say('    spread of year-4 outcomes across 60 runs: sd '+Math.round(sd));
+    ok(sd>1000,'  outcomes genuinely vary run to run');
+    const rr=cfRun(c,many,true,4242);
+    let together=0,total=0;
+    rr.rows.forEach((row,i)=>{ if(i===0) return;
+      const dp=row.pension-rr.rows[i-1].pension, di=row.invest-rr.rows[i-1].invest;
+      if(dp!==0&&di!==0){ total++; if((dp>0)===(di>0)) together++; }
+    });
+    say('    pension and investments moved the same way in '+together+' of '+total+' years');
+    ok(total>0&&together/total>0.9,'  pots share one market, they do not drift apart');
+
+    /* ---------------- volatility drag ---------------- */
+    say('--- volatility drag ---');
+    const calm=cfMonteCarlo(c,Object.assign({},many,{vol:2}),200);
+    const wild=cfMonteCarlo(c,Object.assign({},many,{vol:25}),200);
+    say('    median end, vol 2%: '+Math.round(calm.p50)+'   vol 25%: '+Math.round(wild.p50));
+    ok(wild.p50<calm.p50,'  more volatility, lower median for the same average return');
+    ok(wild.cvar5<calm.cvar5,'  and a worse tail');
+
+    /* ---------------- risk metrics ---------------- */
+    say('--- risk measures ---');
+    const mc=cfMonteCarlo(c,many,300);
+    say('    success '+mc.success+'%   p10 '+Math.round(mc.p10)+'  p50 '+Math.round(mc.p50)+'  p90 '+Math.round(mc.p90));
+    ok(mc.p10<=mc.p50&&mc.p50<=mc.p90,'  the percentiles are in order');
+    ok(mc.cvar5<=mc.var5,'  CVaR sits at or below VaR, as it must');
+    ok(mc.worstDD>=mc.medianDD,'  worst drawdown is at least the median one');
+    ok(mc.success>=0&&mc.success<=100,'  success rate is a percentage');
+
+    /* ---------------- sequence of returns ---------------- */
+    say('--- sequence of returns ---');
+    const d=blankClient();
+    d.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    d.data.personal.a1={firstName:'Draw',surname:'Down',dob:'1961-06-01'};
+    d.data.retirement={a1:{retireAge:65,desiredIncome:38000,incomeCcy:'GBP'},a2:{}};
+    d.data.dcPensions=[{_id:'q1',name:'SIPP',owner:'Applicant 1',value:1000000,ccy:'GBP',nmpa:55}];
+    d.data.cash=[{_id:'q2',bank:'Bank',owner:'Applicant 1',amount:20000,ccy:'GBP'}];
+    d.data.incomeExp={expTotal:38000};
+    DB.clients.unshift(d);
+    const DS=Object.assign({},S0,{growPension:5,growInvest:5,growCash:1,shockPct:35,endAge:95});
+    const seq=cfSequenceTest(d,DS,[0,5,10,15]);
+    ok(!!seq,'  the test ran');
+    if(seq){
+      say('    base plan ends with '+Math.round(seq.base)+(seq.baseShortfall?', runs dry '+seq.baseShortfall:''));
+      seq.runs.forEach(r=>say('    a '+seq.pct+'% fall in '+r.year+' (retirement '+(r.off>=0?'+':'')+r.off+'y) costs '
+        +Math.round(r.cost)+(r.yearsLost?'  and '+r.yearsLost+' years':'')));
+      const early2=seq.runs.find(r=>r.off===0), late=seq.runs.find(r=>r.off===15);
+      ok(early2.cost>late.cost,'  a crash at retirement hurts more than one fifteen years later');
+      ok(seq.runs.every(r=>r.cost>0),'  every shock costs something');
+    }
+
+    /* ---------------- safe withdrawal ---------------- */
+    say('--- safe withdrawal ---');
+    const sw=cfSafeWithdrawal(c,Object.assign({},S0,{growPension:5,growInvest:5}));
+    if(sw){
+      say('    sustainable: '+Math.round(sw.amount)+'/yr  (they asked for '+Math.round(sw.start)+')'
+          +(sw.rate?'  = '+sw.rate.toFixed(1)+'% of the pot at retirement':''));
+      ok(sw.amount>0,'  a figure was found');
+      ok(!sw.rate||(sw.rate>0.5&&sw.rate<15),'  and it is a believable withdrawal rate');
+    } else say('    (not applicable — no retirement income set)');
+
+    /* ---------------- one-off events ---------------- */
+    say('--- timeline events ---');
+    const yr=new Date().getFullYear()+3;
+    const evR=cfRun(c,Object.assign({},S0,{events:[{label:'Inheritance',year:yr,amount:60000,ccy:'GBP',dir:'in'},
+                                                   {label:'Roof',year:yr,amount:15000,ccy:'GBP',dir:'out'}]}),false);
+    const evRow=evR.rows.find(r=>r.year===yr);
+    near(evRow.srcInc.events,60000,0.01,'  money in is recorded as its own source');
+    ok(evR.sources.some(x=>x.id==='events'),'  and appears in the legend list');
+    near(evRow.expenses,45000+15000,0.01,'  money out joins the expenses');
+    near(evRow.net,80000+60000-60000,0.01,'  and the surplus reflects both');
+
+    /* ---------------- the two charts ---------------- */
+    say('--- the charts ---');
+    const flow=cfChartFlow(ret);
+    ok(flow.indexOf('<svg')===0,'  the cash flow chart is an SVG');
+    ok(flow.indexOf('Deficit covered by savings')>=0,'  with the green deficit block in the legend');
+    ok(flow.indexOf('salary')>=0,'  and the salary as a source');
+    ok(flow.indexOf('Expenses')>=0,'  and the expenses line');
+    ok(flow.indexOf('Shortfall not covered')<0,'  no red shortfall on a plan that never runs out');
+    const flowE=cfChartFlow(er);
+    ok(flowE.indexOf('Shortfall not covered')>=0,'  the early-retirement plan does show the red shortfall');
+    const sav=cfChartSavings(ret,null);
+    ok(sav.indexOf('<svg')===0,'  the savings chart is an SVG');
+    ok(sav.indexOf('Barclays')>=0&&sav.indexOf('Aviva')>=0&&sav.indexOf('ISA')>=0,'  every pot is in its legend');
+    ok(sav.indexOf('Accumulated shortfall')<0,'  and no shortfall bar when there is none');
+    const savE=cfChartSavings(er,null);
+    ok(savE.indexOf('Accumulated shortfall')>=0,'  the shortfall bar appears when the money runs out');
+    ok((savE.match(/fill="#E8695A"/g)||[]).length>0,'  drawn in red below the line');
+    ok(sav.indexOf('retires')>=0,'  with the retirement marker');
+    ok(sav.indexOf('<title>')>=0,'  and hover labels on the bars');
+    const savMc=cfChartSavings(ret,cfMonteCarlo(c,many,50));
+    ok(savMc.indexOf('Likely range')>=0,'  the stress version overlays the likely range');
+    ok(typeof cfChart==='function'&&cfChart(ret,null)===sav,'  cfChart still answers, as the savings chart');
+    /* the nice axis */
+    ok(cfNice(1000000,5)===200000,'  a 1m range steps in 200k');
+    ok(cfNice(47000,5)===10000,'  a 47k range steps in 10k');
+    ok(cfAxisFmt(-250000)==='−250k'&&cfAxisFmt(1500000)==='1.5m'&&cfAxisFmt(0)==='0','  axis labels read as k and m');
+
+    /* ---------------- the screen ---------------- */
+    say('--- the cashflow screen ---');
+    S.clientId=c.id; S.screen='cashflow'; S.cfTab='assume'; render();
+    const P=()=>document.querySelector('.page').innerText.toLowerCase();
+    const has=t=>P().indexOf(t.toLowerCase())>=0;
+    ok(has('charges'),'  Assumptions shows a Charges block');
+    ok(!!document.querySelector('[data-cf="feePlatform"]'),'  with a platform fee box');
+    ok(!document.querySelector('[data-cf="taxOn"]'),'  and no tax switch');
+    ok(!document.querySelector('[data-cf="regime_a1"]'),'  no tax residence picker');
+    ok(has('before tax'),'  and says plainly that figures are before tax');
+    ok(!has('tax residence')&&!has('tax-free cash'),'  no tax wording left on Assumptions');
+    ok(document.querySelector('.page').innerText.indexOf('before tax')>=0,'  the header badge says before tax');
+
+    S.cfTab='chart'; render();
+    ok(has('cash flow forecast'),'  the chart tab is headed Cash flow forecast');
+    ok(has('savings over time'),'  and Savings over time');
+    /* buttons carry inline icon SVGs, so count only the charts */
+    const charts=()=>document.querySelectorAll('.page svg[role="img"]').length;
+    ok(charts()===2,'  with two charts');
+
+    S.cfTab='yearly'; render();
+    ok(has('drawn from savings'),'  the yearly table has a drawn-from-savings column');
+    ok(has('surplus / deficit'),'  and a surplus/deficit column');
+    ok(![...document.querySelectorAll('.page th')].some(th=>/tax/i.test(th.textContent)),'  and no tax column');
+
+    S.cfTab='flows'; render();
+    ok([...document.querySelectorAll('.page th')].some(th=>th.textContent==='Inflation'),'  the income table has an Inflation column');
+    ok(has('assumed (2.5%)'),'  showing the assumed rate on inflation-linked lines');
+    ok(has('salary growth ('),'  and salary growth on the salary');
+    ok(has('inflation column'),'  and says each line rises at the rate in its Inflation column');
+    ok(JSON.stringify(SECTIONS).indexOf('"taxRate"')<0,'  the tax-rate question is gone from the Fact Find');
+    ok(JSON.stringify(SECTIONS).indexOf('"desiredIncome"')>=0,'  while the retirement income question stays');
+
+    S.cfTab='pots'; S.cfPot=null; render();
+    ok(!document.querySelector('[data-cf="potval_pen0"]'),'  pots start closed');
+    ACT.cfPot('pen0');
+    ['potval_pen0','grow_pen0','fee_pen0','init_pen0','ccy_pen0'].forEach(k=>
+      ok(!!document.querySelector('[data-cf="'+k+'"]'),'  opening a pot shows '+k.split('_')[0]));
+    ok(!document.querySelector('[data-cf="treat_pen0"]'),'  and no "taxed as" picker');
+    ok(has('cash first, then investments, then pensions'),'  the draw order is stated');
+
+    S.cfTab='stress'; render();
+    ok(has('when the bad year lands'),'  Stress has the sequence-of-returns test');
+    ACT.cfSeq(); await wait(400); render();
+    ok(has('the year they retire'),'  the sequence table renders');
+    ACT.cfSwr(); await wait(900); render();
+    ok(has('income the plan supports'),'  the sustainable income renders');
+    ACT.cfMc(); await wait(1500); render();
+    ok(has('var')&&has('cvar'),'  and the risk measures');
+    ok(charts()===1&&has('likely range'),'  with the savings chart and its range');
+
+    /* typing into an assumption still saves and re-renders */
+    S.cfTab='assume'; render();
+    const inflBox=document.querySelector('[data-cf="inflation"]');
+    inflBox.value='3'; inflBox.dispatchEvent(new Event('input',{bubbles:true}));
+    ok(cfSettings(getClient(c.id)).inflation===3,'  typing an assumption saves it');
+    await wait(900);
+
+    /* ---------------- multi-currency ---------------- */
+    say('--- currencies ---');
+    const m=blankClient();
+    m.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    m.data.personal.a1={firstName:'Multi',surname:'Ccy',dob:'1970-01-01'};
+    m.data.retirement={a1:{retireAge:65,desiredIncome:30000,incomeCcy:'EUR'},a2:{}};
+    m.data.cash=[{_id:'m1',bank:'Emirates NBD',owner:'Applicant 1',amount:100000,ccy:'AED'}];
+    m.data.investments=[{_id:'m2',provider:'Vanguard',owner:'Applicant 1',value:200000,ccy:'USD'}];
+    m.data.dcPensions=[{_id:'m3',name:'Aviva',owner:'Applicant 1',value:300000,ccy:'GBP',nmpa:57}];
+    m.data.incomeExp={expTotal:20000};
+    DB.clients.unshift(m);
+    const MS=Object.assign({},CF_DEFAULTS,{feePlatform:0,feeOcf:0,feeAdviser:0,basis:'steady',
+      inflation:0,salaryGrowth:0,growCash:0,growInvest:0,growPension:0,endAge:80});
+    const inp=cfInputs(m,MS);
+    ok(inp.pots.length===3,'  three pots in three currencies');
+    const aed=inp.pots.find(x=>x.ccy==='AED');
+    ok(!!aed&&aed.native===100000,'  the dirham account is held as 100,000 AED, not pre-converted');
+    ok(Math.abs(aed.value-100000*CF_GBP.AED)<1,'  and is worth '+Math.round(aed.value)+' GBP today');
+    const retI=inp.spends.find(x=>x.id==='retinc');
+    ok(!!retI&&retI.ccy==='EUR'&&Math.abs(retI.native-30000)<1,'  the desired income is recognised as 30,000 EUR');
+    const M2=Object.assign({},MS,{ccyOf:{inv0:'EUR'}});
+    const inv=cfInputs(m,M2).pots.find(x=>x.id==='inv0');
+    ok(inv.ccy==='EUR'&&inv.factCcy==='USD'&&m.data.investments[0].ccy==='USD','  a currency override leaves the Fact Find alone');
+    const D2=Object.assign({},MS,{fxDrift:{EUR:-1}});
+    ok(Math.abs(cfRateAt(m,D2,'EUR',10)-CF_GBP.EUR*Math.pow(0.99,10))<1e-9,'  −1%/yr drift compounds properly');
+    const flat=cfRun(m,Object.assign({},MS,{growInvest:5,growPension:5,growCash:1}),false);
+    const fall=cfRun(m,Object.assign({},MS,{growInvest:5,growPension:5,growCash:1,fxDrift:{USD:-2,AED:-2}}),false);
+    ok(fall.endTotal<flat.endTotal,'  a falling holding currency reduces the plan');
+    const only1=cfRun(c,Object.assign({},S0,{growPension:5,growInvest:5}),false);
+    const only2=cfRun(c,Object.assign({},S0,{growPension:5,growInvest:5,fxDrift:{EUR:-5},fxShockPct:-30}),false);
+    ok(Math.abs(only1.endTotal-only2.endTotal)<0.01,'  drift and shocks do not touch a GBP-only plan');
+
+    /* ---------------- several plans on one client ---------------- */
+    say('--- comparing plans ---');
+    const sc=blankClient();
+    sc.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    sc.data.personal.a1={firstName:'Sce',surname:'Nario',dob:'1970-01-01'};
+    sc.data.retirement={a1:{retireAge:65,desiredIncome:30000,incomeCcy:'GBP'},a2:{}};
+    sc.data.dcPensions=[{_id:'s1',name:'SIPP',owner:'Applicant 1',value:500000,ccy:'GBP',nmpa:57}];
+    sc.data.incomeExp={expTotal:30000};
+    sc.cashflow={growPension:5,growInvest:5,endAge:90,basis:'steady',inflation:0};
+    DB.clients.unshift(sc);
+    S.clientId=sc.id;
+    ok(cfScenarios(sc).length===1&&cfActiveId(sc)==='base','  a client starts with one plan');
+    ACT.cfScenAdd();
+    const second=cfActiveId(sc);
+    ok(cfScenarios(sc).length===2&&second!=='base','  a second plan can be added and is shown');
+    cfSave(sc,{retire_a1:60},second);
+    ok(cfSettings(sc,second).retire_a1===60&&cfSettings(sc,'base').retire_a1==null,'  editing the copy leaves the base alone');
+    const rBase=cfRun(sc,cfSettings(sc,'base'),false), rEarly=cfRun(sc,cfSettings(sc,second),false);
+    ok(rEarly.firstRetYear<rBase.firstRetYear,'  the second plan really does retire earlier');
+    ok((rEarly.shortfallYear||9999)<=(rBase.shortfallYear||9999),'  and runs the money out no later');
+    S.screen='cashflow'; S.cfTab='compare'; render();
+    const cmp=document.querySelector('.page').innerText.toLowerCase();
+    ok(cmp.indexOf('pot at retirement')>=0,'  the compare table renders');
+    ok(cmp.indexOf('drawn from savings')>=0,'  with the drawn-from-savings row');
+    ok(cmp.indexOf('tax over the plan')<0&&cmp.indexOf('where they are taxed')<0,'  and no tax rows');
+    ACT.cfScen('base'); ACT.cfScen(second); ACT.cfScenDel();
+    ok(cfScenarios(sc).length===1&&cfActiveId(sc)==='base','  a plan can be removed');
+
+    /* ---------------- an old plan with tax settings still works ---------------- */
+    say('--- an old client record ---');
+    const old=blankClient();
+    old.data.meta={ffDate:'2026-08-01',ffCurrency:'GBP'};
+    old.data.personal.a1={firstName:'Old',surname:'Plan',dob:'1965-01-01'};
+    old.data.retirement={a1:{retireAge:65,desiredIncome:25000,incomeCcy:'GBP'},a2:{}};
+    old.data.dcPensions=[{_id:'o1',name:'SIPP',owner:'Applicant 1',value:300000,ccy:'GBP',nmpa:57}];
+    old.data.incomeExp={expTotal:25000};
+    old.cashflow={taxOn:1,regime:{a1:{base:'UK'}},pclsAge:{a1:65},treat:{pen0:'income'},growPension:4,basis:'steady',inflation:0};
+    DB.clients.unshift(old);
+    const oldRun=cfRun(old,cfSettings(old),false);
+    ok(!!oldRun&&oldRun.rows.length>0,'  a plan saved with tax settings still projects');
+    ok(cfSettings(old).growPension===4,'  keeping the settings that still mean something');
+    S.clientId=old.id; S.screen='cashflow'; S.cfTab='chart'; render();
+    ok(charts()===2,'  and its screen renders both charts');
+
+    /* ---------------- the client report, CashCalc-shaped ---------------- */
+    say('--- the client report ---');
+    S.clientId=c.id;
+    ACT.cfScenAdd();                       /* two plans, so the per-plan pages repeat */
+    cfSave(c,{retire_a1:60},cfActiveId(c));
+    let cap=null; const _od=openDoc; openDoc=function(t,b,f){ cap={t,b,f}; };
+    try{ cfClientReport(c,'A short summary paragraph.\n\nAnd a second one.'); } finally { openDoc=_od; }
+    ok(!!cap,'  the report composes');
+    const R=cap?cap.b:'';
+    const sheets=(R.match(/class="sheet/g)||[]).length;
+    say('    '+sheets+' pages');
+    ok(sheets>=14,'  it is a proper multi-page document');
+    ok(/class="sheet cover"/.test(R)&&/Cashflow Forecast<\/div>/.test(R),'  with a cover');
+    ok(R.indexOf('Created by ')>=0,'  naming who created it');
+    ['Introduction','Overview','Forecasts included','Assumptions','Savings &amp; Investments','Incomes','Expenses',
+     'Charges &amp; Fees','Cash Flow Forecast','Savings Over Time','Yearly Breakdown','Stress Test','Important information']
+      .forEach(t=>ok(R.indexOf(t)>=0,'  section: '+t.replace('&amp;','&')));
+    ok(R.indexOf('Real Return Rate')>=0&&R.indexOf('Starting Amount')>=0,'  the savings table has the CashCalc columns');
+    ok(R.indexOf('Default Tax Rate')<0&&R.indexOf('Charges</th>')>=0,'  with Charges where the tax column was');
+    ok(R.indexOf('Start Age')>=0&&R.indexOf('Inflation Rate')>=0,'  incomes and expenses carry start/end age and inflation');
+    ok((R.match(/class="n g"/g)||[]).length>0&&(R.match(/class="n r"/g)||[]).length>0,'  income in green, spending in red');
+    ok((R.match(/Cash Flow Forecast<\/h2>/g)||[]).length===2,'  the cash flow chart page repeats for each plan');
+    ok(R.indexOf('PLAN 2')>=0,'  and the second plan is named in capitals, as CashCalc does');
+    /* the cover carries no number, as CashCalc's does not, so numbering starts at page 2 */
+    ok(R.indexOf('Page 1 | ')<0&&R.indexOf('Page 2 | '+sheets)>=0&&R.indexOf('Page '+(sheets-1)+' | '+sheets)>=0,'  pages are numbered n | total from page 2');
+    ok(R.indexOf('Your Goals, Our Mission')>=0,'  and it ends on the branded back cover');
+    ok(R.indexOf('A short summary paragraph.')>=0,'  the adviser’s summary is included when given');
+    ok(R.indexOf('before tax')>=0,'  and it says before tax');
+    ok(!/cfChart\(/.test(R)&&!/undefined/.test(R)&&!/NaN/.test(R),'  nothing undefined or NaN leaked into it');
+    ACT.cfScenDel();
+
+    /* ---------------- per-pot charges and initial fees ---------------- */
+    say('--- charges per pot, initial fee ---');
+    const fp=blankClient();
+    fp.data.meta={ffDate:'2026-09-25',ffCurrency:'GBP'};
+    fp.data.personal.a1={firstName:'Fee',surname:'Case',dob:'1975-01-01'};
+    fp.data.retirement={a1:{retireAge:65,desiredIncome:1,incomeCcy:'GBP'},a2:{}};
+    fp.data.dcPensions=[
+      {_id:'f1',name:'Cheap SIPP',owner:'Applicant 1',value:100000,ccy:'GBP',nmpa:57},
+      {_id:'f2',name:'Expensive bond',owner:'Applicant 1',value:100000,ccy:'GBP',nmpa:57}];
+    fp.data.incomeExp={expTotal:1};
+    DB.clients.unshift(fp);
+    const FS=Object.assign({},CF_DEFAULTS,{basis:'steady',inflation:0,salaryGrowth:0,
+      growCash:0,growInvest:5,growPension:5,endAge:80,feePlatform:1,feeOcf:0,feeAdviser:0});
+    const FS2=Object.assign({},FS,{fees:{pen1:{platform:3,ocf:0,adviser:0}}});
+    near(cfFeeFor(FS2,'pen0'),1,0.001,'  the first pot on the default 1%');
+    near(cfFeeFor(FS2,'pen1'),3,0.001,'  the second pot on its own 3%');
+    const feeOnly1=cfRun(fp,Object.assign({},FS2,{exclude:{pen1:1}}),false);
+    const feeOnly2=cfRun(fp,Object.assign({},FS2,{exclude:{pen0:1}}),false);
+    ok(feeOnly2.endTotal<feeOnly1.endTotal,'  the pot charged 3% ends well below the one charged 1%');
+    const IS=Object.assign({},FS,{growPension:0,feePlatform:0});
+    const noInit=cfRun(fp,IS,false);
+    const withInit=cfRun(fp,Object.assign({},IS,{initFee:{pen0:{pct:3,year:0}}}),false);
+    near(noInit.endTotal-withInit.endTotal,3000,1,'  a 3% initial fee on one 100,000 pot takes exactly 3,000');
+    near(withInit.rows[0].initFees,3000,1,'  charged in the first year');
+    ok((withInit.rows[1]||{}).initFees===0,'  and only once');
+    const valRun=cfRun(fp,Object.assign({},IS,{potVal:{pen0:200000}}),false);
+    near(valRun.startTotal-noInit.startTotal,100000,1,'  a value override changes the starting pot');
+    ok(fp.data.dcPensions[0].value===100000,'  and the Fact Find still says 100,000');
+
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L.join(NL);
+};
+</script>

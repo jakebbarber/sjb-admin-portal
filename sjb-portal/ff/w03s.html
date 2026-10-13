@@ -1,0 +1,80 @@
+/* ===========================================================================
+   PORTAL STORE — replaces the browser-storage functions when the tool runs
+   on the SJB server. Same DB shape, same save()/load() names; the server is
+   the single source of truth and every change syncs within a second.
+   ========================================================================= */
+const SYNCED={clients:{},requests:'',sends:'',settings:''};
+let SYNC_BUSY=false, SYNC_AGAIN=false, AUTH_USER=null, STORE_MSG='';
+
+async function api(method,path,body){
+  const res=await fetch(path,{method,headers:body?{'content-type':'application/json'}:{},
+    body:body?JSON.stringify(body):undefined,credentials:'same-origin'});
+  if(res.status===401){ AUTH_USER=null; throw Object.assign(new Error('Please sign in.'),{auth:true}); }
+  const txt=await res.text(); let data={};
+  try{ data=txt?JSON.parse(txt):{}; }catch(e){ data={error:txt}; }
+  if(!res.ok) throw new Error(data.error||('Server error '+res.status));
+  return data;
+}
+function probeStorage(){ STORE_OK=true; return true; }
+function load(){ return false; }   /* real loading happens in boot() */
+
+/* Push only what changed since the last successful sync. */
+async function syncNow(){
+  if(SYNC_BUSY){ SYNC_AGAIN=true; return; }
+  SYNC_BUSY=true;
+  try{
+    const body={};
+    const changed=[];
+    DB.clients.forEach(c=>{ const s=JSON.stringify(c); if(SYNCED.clients[c.id]!==s){ changed.push(c); } });
+    if(changed.length) body.clients=changed;
+    const rq=JSON.stringify(DB.requests); if(rq!==SYNCED.requests) body.requests=DB.requests;
+    const sd=JSON.stringify(DB.sends); if(sd!==SYNCED.sends) body.sends=DB.sends;
+    const st=JSON.stringify(DB.settings); if(st!==SYNCED.settings) body.settings=DB.settings;
+    /* deletions */
+    const have=new Set(DB.clients.map(c=>c.id));
+    const gone=Object.keys(SYNCED.clients).filter(id=>!have.has(id));
+    for(const id of gone){ await api('DELETE','/api/clients/'+encodeURIComponent(id)); delete SYNCED.clients[id]; }
+    if(Object.keys(body).length){
+      await api('PUT','/api/state',body);
+      changed.forEach(c=>{ SYNCED.clients[c.id]=JSON.stringify(c); });
+      if(body.requests) SYNCED.requests=rq; if(body.sends) SYNCED.sends=sd; if(body.settings) SYNCED.settings=st;
+    }
+    LAST_SAVE=new Date(); STORE_OK=true; STORE_MSG=''; flashSaved();
+  }catch(e){
+    STORE_OK=false;
+    STORE_MSG=e.auth?'Your sign-in has expired — sign in again to keep saving.':'The server cannot be reached — changes are held in this tab until it is back.';
+    if(!STORE_WARNED){ STORE_WARNED=true; toast('Not saving',STORE_MSG,'risk',9000); render(); }
+    if(e.auth){ showLogin(); }
+  }finally{
+    SYNC_BUSY=false;
+    if(SYNC_AGAIN){ SYNC_AGAIN=false; syncNow(); }
+  }
+}
+function save(now){
+  clearTimeout(SAVE_T); SAVE_T=null;
+  if(now) syncNow(); else SAVE_T=setTimeout(syncNow,600);
+}
+function markSynced(){
+  SYNCED.clients={}; DB.clients.forEach(c=>{ SYNCED.clients[c.id]=JSON.stringify(c); });
+  SYNCED.requests=JSON.stringify(DB.requests); SYNCED.sends=JSON.stringify(DB.sends); SYNCED.settings=JSON.stringify(DB.settings);
+}
+async function pullState(){
+  const st=await api('GET','/api/state');
+  AUTH_USER=st.user;
+  DB.clients=st.clients||[]; DB.requests=st.requests||[]; DB.sends=st.sends||[]; DB.settings=st.settings||{};
+  DB.clients.forEach(c=>{ c.data=c.data||{};
+    SECTIONS.forEach(s=>{
+      if(s.rows){ if(!Array.isArray(c.data[s.id])) c.data[s.id]=[]; }
+      else if(s.per==='applicant'){ const v=c.data[s.id]||{}; c.data[s.id]={a1:v.a1||{},a2:v.a2||{}}; }
+      else if(!c.data[s.id]||typeof c.data[s.id]!=='object') c.data[s.id]={};
+    });
+  });
+  DB.clients.sort((a,b)=>(b.updated||'').localeCompare(a.updated||''));
+  INBOX=st.inbox||[];
+  markSynced();
+  STORE_OK=true; STORE_WARNED=false; STORE_MSG='';
+  return st;
+}
+/* Backup / restore go through the server in the portal. */
+function backupJSON(){ return JSON.stringify({app:CFG.app,version:CFG.version,exported:new Date().toISOString(),
+  clients:DB.clients,requests:DB.requests,sends:DB.sends,settings:DB.settings},null,1); }

@@ -1,0 +1,156 @@
+<!doctype html><meta charset="utf-8"><title>KYC link test</title>
+<script>
+/* The documents link is the KYC link: ID, proof of address, proof of bank,
+   tax number, beneficiaries and — new — the bank account itself. This drives
+   the real /api/docs routes, not the page. Fictional data only. */
+window.__runKyc=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const NL=String.fromCharCode(10);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    const call=async(method,path,body)=>{
+      const h=new Headers(); if(jar) h.set('x-session',jar);
+      if(body!=null) h.set('content-type','application/json');
+      const res=await H.__handle(new Request(location.origin+path,
+        {method,headers:h,body:body!=null?JSON.stringify(body):undefined}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2;
+      return {status:res.status,body:await res.json().catch(()=>({}))};
+    };
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+
+    /* a client with a bank row the adviser already started */
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-26',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={firstName:'Priya',surname:'Mistry'};
+    c.data.bank=[{_id:'k1',owner:'Applicant 1',bank:'Barclays'}];
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,500));
+
+    /* the adviser creates the documents link, as the button does */
+    const mk=await call('POST','/api/clients/'+c.id+'/docs',{});
+    say('doclink: '+mk.status+' '+JSON.stringify(mk.body).slice(0,90));
+    const token=mk.body.token||(String(mk.body.url||'').match(/\/d\/([A-Za-z0-9_-]+)/)||[])[1];
+    ok(!!token,'  the link is created');
+    if(!token) return L.join(NL);
+
+    const got=await call('GET','/api/docs/'+token);
+    ok(got.status===200,'  the client can open it');
+    say('    it greets: '+got.body.firstName+'  ref '+got.body.ref);
+
+    /* what the page asks for */
+    let page=''; try{ const pr=await ORIG('/server/public/docs.html'); if(pr.ok) page=await pr.text(); }catch(e){}
+    const src=page||document.documentElement.outerHTML;
+    ['passport','holding your UK passport','Proof of address','Proof of bank',
+     'Tax Identification Number','beneficiary details','Your bank account']
+      .forEach(t=>ok(src.indexOf(t)>=0,'  the page asks for: '+t));
+    ['Name of bank','Name on the account','Sort code','Account number','IBAN','BIC / SWIFT',
+     'How long have you held it?'].forEach(t=>ok(src.indexOf(t)>=0,'    bank field: '+t));
+
+    /* the client uploads their bank statement */
+    const b64=btoa('not a real statement');
+    const up=await call('POST','/api/docs/'+token+'/upload',
+      {fileId:null,name:'statement.pdf',label:'4. Proof of bank',size:20,totalChunks:1,index:0,dataB64:b64});
+    ok(up.status===200,'  the statement uploads');
+
+    /* …and sends the typed details */
+    const det=await call('POST','/api/docs/'+token+'/details',{
+      tin:'X1234567L',
+      beneficiaries:[{name:'Anil Mistry',relationship:'Son',dob:'1998-03-02',
+        phone:'07700 900123',email:'anil@example.com',address:'1 High Street',pct:'100'}],
+      bank:{bank:'',accountName:'P Mistry',ccy:'GBP',sortCode:'20-00-00',
+        accountNo:'12345678',iban:'',bic:'',heldSince:'about 9 years'}});
+    ok(det.status===200,'  the details are accepted');
+
+    await api('GET','/api/state'); await new Promise(r=>setTimeout(r,400));
+    const cc=(await call('GET','/api/state')).body.clients.find(x=>x.id===c.id);
+    const bk=(cc.data.bank||[])[0]||{};
+    say('    bank row now: '+JSON.stringify(bk));
+    ok(bk.accountName==='P Mistry','  the account name landed');
+    ok(bk.sortCode==='20-00-00'&&bk.accountNo==='12345678','  sort code and account number landed');
+    ok(bk.heldSince==='about 9 years','  how long they have held it landed');
+    ok(bk.bank==='Barclays','  the blank they left did NOT wipe the adviser’s entry');
+    ok(bk.owner==='Applicant 1','  and the rest of the adviser’s row is intact');
+    ok(bk.proof==='Yes','  proof of bank ticked itself off the statement they uploaded');
+    ok((cc.data.bank||[]).length===1,'  still one account, not a duplicate');
+    const ben=(cc.data.beneficiaries||[])[0]||{};
+    ok(ben.name==='Anil Mistry'&&ben.pct==='100','  the beneficiary landed');
+    ok(cc.data.personal.a1.tin==='X1234567L','  and the tax number');
+
+    /* it all reaches the MADS */
+    say('--- into the MADS ---');
+    const v=madsValues(cc);
+    const apps=Object.keys(v).filter(k=>/APPS OUT/.test(k)).map(k=>k+' = '+v[k]);
+    apps.forEach(x=>say('    '+x));
+    ok(apps.some(x=>/Account Name = P Mistry/.test(x)),'  account name reaches Apps Out');
+    ok(apps.some(x=>/Swift\/Sort Code = 20-00-00/.test(x)),'  sort code reaches Apps Out');
+    ok(apps.some(x=>/Account Number = 12345678/.test(x)),'  account number reaches Apps Out');
+    ok(apps.some(x=>/Beneficiary - Full Name 1 = Anil Mistry/.test(x)),'  beneficiary reaches Apps Out');
+    ok(apps.some(x=>/Proof of  Bank = Yes/.test(x)),'  proof of bank reaches Apps Out');
+
+    /* sending twice must not duplicate or clear */
+    const det2=await call('POST','/api/docs/'+token+'/details',{
+      tin:'X1234567L',beneficiaries:[],bank:{iban:'GB29NWBK60161331926819'}});
+    ok(det2.status===200,'  they can send again');
+    const cc2=(await call('GET','/api/state')).body.clients.find(x=>x.id===c.id);
+    const bk2=(cc2.data.bank||[])[0]||{};
+    ok((cc2.data.bank||[]).length===1,'  sending again updates rather than duplicates');
+    ok(bk2.iban==='GB29NWBK60161331926819','  the new answer landed');
+    ok(bk2.accountNo==='12345678','  and the earlier answers survived');
+    ok((cc2.data.beneficiaries||[]).length===1,'  an empty beneficiary list does not wipe them');
+
+    /* ---------- the notice on the Clients screen ---------- */
+    say('--- the portal tells you it arrived ---');
+    const inbox=async()=>(await call('GET','/api/inbox')).body.inbox||[];
+    let ib=await inbox();
+    const kyc=ib.filter(s=>s.kind==='kyc');
+    say('    kyc notices: '+kyc.length+'  summary: '+JSON.stringify((kyc[0]||{}).summary));
+    ok(kyc.length===1,'  one KYC notice, not one per thing sent');
+    ok(String((kyc[0]||{}).clientName).indexOf('Mistry')>=0,'  it names the client');
+    const sum=(kyc[0]||{}).summary||[];
+    ok(sum.some(x=>/Proof of bank/i.test(x)),'  it lists the document they uploaded');
+    ok(sum.some(x=>/Tax number/.test(x)),'  and the tax number');
+    ok(sum.some(x=>/beneficiar/.test(x)),'  and the beneficiaries');
+    ok(sum.some(x=>/Bank details/.test(x)),'  and the bank details');
+
+    /* a second document joins the same notice rather than making a new one */
+    await call('POST','/api/docs/'+token+'/upload',
+      {fileId:null,name:'passport.jpg',label:'1. A photo of your UK passport',size:9,totalChunks:1,index:0,dataB64:btoa('img')});
+    ib=await inbox();
+    const kyc2=ib.filter(s=>s.kind==='kyc');
+    ok(kyc2.length===1,'  a second upload joins the same notice');
+    ok((kyc2[0].summary||[]).some(x=>/passport/i.test(x)),'  and is listed on it');
+    say('    now reads: '+(kyc2[0].summary||[]).join(' · '));
+
+    /* the banner renders, and Seen clears it */
+    INBOX=ib; S.screen='clients'; render();
+    const shown=document.querySelector('.page').innerText;
+    ok(shown.indexOf('sent KYC details')>=0,'  the Clients screen shows the KYC card');
+    ok(!!document.querySelector('[data-a="filesFor"]'),'  with a Documents button');
+    ok(!!document.querySelector('[data-a="ack"]'),'  and a Seen button');
+    await call('POST','/api/submissions/'+kyc2[0].id+'/ack');
+    ok((await inbox()).filter(s=>s.kind==='kyc').length===0,'  pressing Seen clears it');
+
+    /* something arriving afterwards opens a fresh notice */
+    await call('POST','/api/docs/'+token+'/upload',
+      {fileId:null,name:'selfie.jpg',label:'2. A photo of you holding your UK passport next to your face',
+       size:9,totalChunks:1,index:0,dataB64:btoa('img2')});
+    const after=(await inbox()).filter(s=>s.kind==='kyc');
+    ok(after.length===1,'  the next thing they send starts a new notice');
+    ok((after[0].summary||[]).length===1,'  showing only what is new');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L.join(NL);
+};
+</script>

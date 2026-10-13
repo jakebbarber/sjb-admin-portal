@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>noise guard test</title>
+<script>
+window.__runGuard=function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const F=id=>SCHEME_FIELDS.find(f=>f.id===id);
+
+  say('--- the noise that reached the MADS fields ---');
+  const noise=[
+    ['retOptionsUK','Ni A as nein A fief Bs een SEs das rma men Te me Tarai se i'],
+    ['fundSelection','A plan may be invested in a maximum of'],
+    ['bidOffer','12'],
+    ['retOptionsUK','a ee ee ee ee'],
+    ['deathUK','| | 1 || |'],
+    ['name','Ni A as'],
+    ['value','12'],
+    ['amc','7']
+  ];
+  noise.forEach(([id,txt])=>{
+    const fd=F(id); if(!fd) return;
+    const taken=fieldOk(fd,txt);
+    ok(!taken || id==='fundSelection','  rejects '+id+' = '+JSON.stringify(txt.slice(0,46))+(taken?'  <-- STILL ACCEPTED':''));
+  });
+
+  say('--- real answers must still get through ---');
+  const good=[
+    ['retOptionsUK','Tax free cash, flexi-access drawdown, UFPLS and annuity purchase are all available from the plan.'],
+    ['retOptionsNonUK','Tax free cash and annuity purchase only. Drawdown is not offered to members resident outside the UK.'],
+    ['guarantees','This policy has no guarantees'],
+    ['guarantees','A guaranteed annuity rate of 9.1% applies at age 65.'],
+    ['name','Aviva Personal Pension Plan'],
+    ['name','COPPS (ex SERPS)'],
+    ['policyNo','AV-118822'],
+    ['policyNo','SL/4471209/A'],
+    ['policyNo','95768400'],
+    ['value','£214,350.28'],
+    ['value','E33,671.29'],
+    ['tvq','£213,900.00'],
+    ['amc','1.05%'],
+    ['amc','0.85%'],
+    ['bidOffer','0.00%'],
+    ['adviserFeePct','0.50%'],
+    ['crystallisedPct','35%'],
+    ['nmpa','55'],
+    ['ccy','GBP'],
+    ['mpaa','No'],
+    ['exitFee','No exit penalty applies. A terminal bonus of £1,240 is payable.'],
+    ['fundSelection','Aviva Pension MyM BlackRock World ex-UK Equity Index FP (60%), Aviva Pension MyM Diversified Assets Fund II (40%)'],
+    ['performance','5 years to 30/06/2026: +41.2% cumulative, +7.1% annualised.']
+  ];
+  let pass=0;
+  good.forEach(([id,txt])=>{
+    const fd=F(id); if(!fd) return;
+    const taken=fieldOk(fd,txt);
+    if(taken) pass++; else say('  FAIL   rejects a REAL answer: '+id+' = '+JSON.stringify(txt.slice(0,60)));
+  });
+  ok(pass===good.length,'  all '+good.length+' real answers accepted ('+pass+')');
+
+  say('--- looksLikeProse on its own ---');
+  [['Ni A as nein A fief Bs een SEs das rma men Te me Tarai se i',false],
+   ['Tax free cash, flexi-access drawdown, UFPLS and annuity purchase',true],
+   ['This policy has no guarantees',true],
+   ['a ee ee ee ee',false],
+   ['Lump sum only.',true],
+   ['Uncrystallised',true],
+   ['GBP',true]].forEach(([t,want])=>{
+    ok(looksLikeProse(t)===want,'  '+(want?'keeps':'rejects')+' '+JSON.stringify(t.slice(0,50)));
+  });
+  return L.join('\n');
+};
+</script>

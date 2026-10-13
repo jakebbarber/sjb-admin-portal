@@ -1,0 +1,7 @@
+# Copy to .dev.vars for the local sandbox (npx wrangler dev). Never commit .dev.vars.
+# With MOCK_AI=1 the portal runs end to end without calling Claude at all.
+MOCK_AI=1
+PORTAL_PASSCODE=sandbox
+SESSION_SECRET=change-me-in-the-sandbox-too
+# To test against the real model, remove MOCK_AI and add:
+# ANTHROPIC_API_KEY=sk-ant-...

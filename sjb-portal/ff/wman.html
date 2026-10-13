@@ -1,0 +1,75 @@
+/* ===========================================================================
+   SALES MANUAL — the third Admin portal tool.
+
+   The network's Sales Manual is what Compliance feeds to Copilot, so the
+   reviewer reads the same text. When Blacktower issue a new version it is
+   uploaded here (a PDF is read in the browser with the portal's own PDF
+   reader; a Word file is read on the server). The checklist the reviews run
+   against can then be rebuilt from the new manual, or reset to the built-in
+   one. Nothing needs a code change.
+   ========================================================================= */
+const MAN={meta:null,rubric:[],rubricFrom:'',file:null,busy:'',info:null,loaded:false};
+function manBusy(){ return MAN.busy?'<div class="row" style="gap:8px;margin-top:12px"><span class="spin"></span><span class="small muted">'+esc(MAN.busy)+'</span></div>':''; }
+function manSetInfo(kind,text){ MAN.info=text?{kind,text}:null; }
+function manInfo(){ return MAN.info?'<div class="note '+esc(MAN.info.kind)+'" style="margin-top:12px"><span class="ic">'+ic(MAN.info.kind==='risk'?'alert':'info',15)+'</span><div>'+esc(MAN.info.text)+'</div></div>':''; }
+async function manLoad(){ MAN.loaded=true; try{ const r=await rwlApi('GET','/api/rwlmanual'); MAN.meta=r.manual; MAN.rubric=r.rubric||[]; MAN.rubricFrom=r.rubricFrom||''; }catch(e){ manSetInfo('risk',e.message); } }
+
+function screenMan(){
+  const m=MAN.meta, f=MAN.file;
+  let h='<div class="ph"><div><h1>Sales Manual</h1><div class="sub">The manual the reviews are checked against, and the checklist built from it.</div></div></div>'+manInfo();
+  /* current manual */
+  h+='<div class="card"><div class="card-h"><span class="av s or">1</span><div><h3>Current manual</h3><div class="sub">Every review and template check reads this text alongside the checklist.</div></div></div><div class="card-b">';
+  if(m) h+='<div class="kv"><span class="k">Version</span><span class="v">'+esc(m.name)+'</span></div>'
+    +'<div class="kv"><span class="k">Uploaded</span><span class="v">'+esc(rwlWhen(m.at))+' by '+esc(m.uploadedBy||'')+'</span></div>'
+    +'<div class="kv"><span class="k">Read from</span><span class="v">'+esc(m.source||'')+'</span></div>'
+    +'<div class="kv"><span class="k">Text</span><span class="v">'+Math.round(m.chars/1000)+'k characters</span></div>'
+    +'<div class="row" style="margin-top:12px"><button class="btn danger sm" data-a="manDelete">'+ic('trash',14)+' Remove</button></div>';
+  else h+='<p class="small muted">No manual uploaded yet. Until one is, reviews use the built-in checklist only.</p>';
+  h+='</div></div>';
+  /* upload */
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">2</span><div><h3>'+(m?'Upload a new version':'Upload the manual')+'</h3><div class="sub">PDF or Word. The previous version is replaced.</div></div></div><div class="card-b">'
+    +'<div class="field"><label class="lbl">Version name <span class="req">*</span></label><input class="inp" id="manName" placeholder="e.g. BT Sales Manual v4 – October 2026" value="'+esc(MAN.name||'')+'"></div>'
+    +'<div id="manDrop" class="empty" style="border:2px dashed var(--line);border-radius:12px;padding:22px;cursor:pointer'+(f?';border-color:var(--ok)':'')+'"><div class="ei">'+ic(f?'check':'up',22)+'</div>'
+    +(f?'<h4>'+esc(f.name)+'</h4><p>'+Math.round(f.size/1024)+' KB · click to choose a different file</p>':'<h4>Drop the manual here</h4><p>or click to choose it (.pdf or .docx)</p>')+'</div>'
+    +'<input type="file" id="manFile" accept=".pdf,.docx" style="display:none">'+(MAN.busy==='upload'?manBusy():'')
+    +'<div class="row" style="margin-top:14px"><button class="btn pri" data-a="manUpload"'+(f&&!MAN.busy?'':' disabled')+'>'+ic('up',15)+' Upload</button></div></div></div>';
+  /* checklist */
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">3</span><div><h3>Checklist</h3><div class="sub">'+(MAN.rubricFrom==='built-in'?'The built-in checklist, distilled from the manual and from past bounce-backs.':'Built from "'+esc(MAN.rubricFrom)+'".')+'</div></div>'
+    +'<div class="sp row" style="gap:8px">'+(m?'<button class="btn" data-a="manRebuild"'+(MAN.busy?' disabled':'')+'>'+ic('sliders',15)+' Rebuild from the manual</button>':'')
+    +(MAN.rubricFrom!=='built-in'?'<button class="btn ghost" data-a="manReset">Reset to built-in</button>':'')+'</div></div>'
+    +'<div class="card-b flush">'+(MAN.busy==='rebuild'?'<div style="padding:14px 18px">'+manBusy()+'</div>':'')+'<div class="tw"><table class="t"><thead><tr><th style="width:60px">Rule</th><th style="width:180px">Section</th><th style="width:70px">Level</th><th>What the letter must do</th></tr></thead><tbody>'
+    +MAN.rubric.map(r=>'<tr><td class="mono b7">'+esc(r.id)+'</td><td class="small">'+esc(r.section)+'</td><td><span class="bdg '+(r.severity==='must'?'risk':'warn')+'">'+esc(r.severity)+'</span></td><td class="small" style="white-space:normal">'+esc(r.rule)+'</td></tr>').join('')
+    +'</tbody></table></div></div></div>';
+  return h;
+}
+adminTool({id:'man',name:'Sales Manual',icon:'clip',action:'manHome',screen:screenMan,
+  desc:'Upload the current Blacktower Sales Manual so the reviews read the same text Compliance uses, and rebuild the checklist when a new version arrives.'});
+async function manRun(kind,fn){ MAN.busy=kind; manSetInfo(); render(); try{ await fn(); }catch(e){ manSetInfo('risk',e.message||'Something went wrong.'); } MAN.busy=''; render(); }
+Object.assign(ACT,{
+  async manHome(){ S.screen='man'; manSetInfo(); render(); await manLoad(); render(); window.scrollTo(0,0); },
+  manUpload(){
+    MAN.name=(($('#manName')||{}).value||'').trim();
+    if(!MAN.name){ manSetInfo('warn','Give this version a name first.'); render(); return; }
+    if(!MAN.file){ manSetInfo('warn','Choose the manual file first.'); render(); return; }
+    manRun('upload',async()=>{
+      const fd=new FormData(); fd.append('name',MAN.name);
+      if(/\.pdf$/i.test(MAN.file.name)){
+        /* read the PDF here with the portal's own reader; only the text goes to the server */
+        const d=await pdfRead(new Uint8Array(await MAN.file.arrayBuffer()));
+        if(d.scanned||!d.lines.length) throw new Error('That PDF is a scan (pictures of pages), so its text cannot be read. Ask Blacktower for the Word or text version.');
+        fd.append('text',unwrapLines(d.lines).join('\n'));
+      } else fd.append('file',MAN.file);
+      const r=await rwlApi('POST','/api/rwlmanual',null,fd);
+      MAN.file=null; MAN.name=''; await manLoad();
+      toast('Manual uploaded',r.manual.name+' · '+Math.round(r.manual.chars/1000)+'k characters of text.','ok');
+    });
+  },
+  manDelete(){ if(!confirm('Remove the manual? Reviews will use the checklist only until a new one is uploaded.')) return; manRun('delete',async()=>{ await rwlApi('DELETE','/api/rwlmanual'); await manLoad(); }); },
+  manRebuild(){ manRun('rebuild',async()=>{ const r=await rwlApi('POST','/api/rwlmanual/rubric'); await manLoad(); manSetInfo('info',r.summary||'Checklist rebuilt.'); toast('Checklist rebuilt',r.rubric.length+' rules now in force.','ok'); }); },
+  manReset(){ manRun('reset',async()=>{ await rwlApi('DELETE','/api/rwlmanual/rubric'); await manLoad(); toast('Checklist reset','The built-in checklist is back in force.'); }); }
+});
+document.addEventListener('click',e=>{ if(e.target.closest('#manDrop')){ const i=$('#manFile'); if(i) i.click(); } });
+document.addEventListener('change',e=>{ if(e.target&&e.target.id==='manFile'&&e.target.files[0]) manPick(e.target.files[0]); });
+document.addEventListener('dragover',e=>{ if(e.target.closest&&e.target.closest('#manDrop')) e.preventDefault(); });
+document.addEventListener('drop',e=>{ const z=e.target.closest&&e.target.closest('#manDrop'); if(z){ e.preventDefault(); if(e.dataTransfer.files[0]) manPick(e.dataTransfer.files[0]); } });
+function manPick(f){ MAN.name=(($('#manName')||{}).value||'').trim(); if(!/\.(pdf|docx)$/i.test(f.name)){ manSetInfo('warn','Upload a PDF or a Word .docx.'); render(); return; } MAN.file=f; manSetInfo(); render(); }

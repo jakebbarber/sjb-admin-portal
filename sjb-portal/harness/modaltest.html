@@ -1,0 +1,109 @@
+<!doctype html><meta charset="utf-8"><title>upload-path test</title>
+<script>
+/* Drives the SAME path the adviser uses: choose files, recoReadGo, read the
+   modal. The earlier harnesses called readDocument directly and so missed a
+   flag that was simply never copied onto the document record. */
+window.__runModal=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-25',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={firstName:'Test',surname:'Client'};
+    c.data.dcPensions=[{_id:uid('r'),owner:'Applicant 1',name:'Aviva Personal Pension',policyNo:'AV-118822',ccy:'GBP',value:'214000'}];
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+    S.clientId=c.id; S.screen='client'; S.section='recommendation';
+
+    const grab=async n=>new File([await (await ORIG('/'+n)).blob()],n);
+    const modal=()=>(document.querySelector('#modal')||{}).innerText||'';
+
+    const cases=[
+      {file:'rq.pdf',            label:'text layer is only page furniture', want:'The pages are pictures'},
+      {file:'tvq_real.pdf',      label:'a true scan',                       want:'This is a scan'},
+      {file:'sample_loa.docx',   label:'a proper reply',                    want:null},
+      {file:'tvqs/jan1.pdf',     label:'a PDF that gave a few answers',      want:'OCRBTN'},
+      {file:'tvqs/jun1.pdf',     label:'a text-rich PDF',                    want:'OCRBTN'}
+    ];
+    for(const t of cases){
+      /* The client TVQs some of these cases were written against were deleted
+         after the tuning session. Say so rather than report a false failure. */
+      const probe=await ORIG('/'+t.file).catch(()=>({ok:false}));
+      if(!probe.ok){ say('--- '+t.label+' ('+t.file+') — SKIPPED, fixture no longer on disk'); continue; }
+      say('--- '+t.label+' ('+t.file+')');
+      ACT.recoRead('');
+      const dt=new DataTransfer(); dt.items.add(await grab(t.file));
+      document.querySelector('#recoFile').files=dt.files;
+      await ACT.recoReadGo();
+      const d=(S.flow.docs||[])[0]||{};
+      const txt=modal();
+      say('    flags: scanned='+!!d.scanned+' thin='+!!d.thin+' images='+d.images
+        +'  answers='+(d.rows||[]).filter(r=>r.value!=null&&r.value!=='').length);
+      if(t.want==='OCRBTN'){
+        ok(txt.indexOf('Read the pages with OCR')>=0,'    offers OCR even though it found '+(d.rows||[]).filter(r=>r.value!=null&&r.value!==String()).length);
+        ok(!!d.file,'    keeps the file so OCR can re-read it');
+      } else if(t.want){
+        ok(txt.indexOf('Read the pages with OCR')>=0,'    offers to read the pages with OCR');
+        ok(!!d.file,'    keeps the file so it can be re-read');
+
+        ok(txt.indexOf(t.want)>=0,'    modal says "'+t.want+'"');
+        ok(txt.indexOf('may be ones I do not recognise')<0,'    and not the generic "words I do not recognise" message');
+        ok(txt.indexOf('Ask the assistant')<0,'    does not offer the assistant on a document with no text');
+        ok(txt.indexOf('would be added as new pensions')<0,'    does not offer to create a pension from nothing');
+      } else {
+        ok((d.rows||[]).filter(r=>r.value!=null&&r.value!=='').length>=19,'    reads the reply properly');
+        ok(txt.indexOf('The pages are pictures')<0&&txt.indexOf('This is a scan')<0,'    no false scan warning');
+      }
+      dismissModal();
+    }
+    say('--- OCR merges rather than replaces ---');
+    {
+      ACT.recoRead('');
+      const dt2=new DataTransfer(); dt2.items.add(await grab('tvqs/jan1.pdf'));
+      document.querySelector('#recoFile').files=dt2.files;
+      await ACT.recoReadGo();
+      const dd=(S.flow.docs||[])[0];
+      const beforeKeys=(dd.rows||[]).filter(r=>r.value!=null&&r.value!==String()).map(r=>r.id);
+      say('    from the text layer: '+beforeKeys.join(', '));
+      /* stand in for the OCR result with text we know, as ocrDoc would */
+      const ocrText=await (await ORIG('/tvq_ocr.txt')).text();
+      const g=extractScheme({lines:ocrText.split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean),tables:[],ocr:true});
+      let added=0;
+      dd.rows=SCHEME_FIELDS.filter(x=>x.id!=='dcReco').map(x=>{
+        const had=(dd.rows||[]).find(r=>r.id===x.id);
+        if(had&&had.value!=null&&had.value!==String()) return had;
+        const hit2=g[x.id]; if(hit2) added++;
+        return {id:x.id,value:hit2?hit2.value:null,where:hit2?('OCR · '+hit2.where):String(),use:!!hit2,fromOcr:!!hit2};
+      });
+      const afterKeys=(dd.rows||[]).filter(r=>r.value!=null&&r.value!==String()).map(r=>r.id);
+      say('    after OCR: '+afterKeys.join(', ')+'   (+'+added+')');
+      ok(beforeKeys.every(k=>afterKeys.indexOf(k)>=0),'    nothing the text layer found was lost');
+      ok(afterKeys.length>=beforeKeys.length,'    the total never goes down');
+      dismissModal();
+    }
+    say('--- the path OCR feeds into ---');
+    const ocrText=await (await ORIG('/tvq_ocr.txt')).text();
+    const doc={lines:ocrText.split(String.fromCharCode(10)).map(x=>x.trim()).filter(Boolean),tables:[],kind:'PDF',ocr:true};
+    const found=extractScheme(doc);
+    say('    fields from OCR text: '+Object.keys(found).length+'  ['+Object.keys(found).join(', ')+']');
+    ok(Object.keys(found).length>=4,'    OCR text still yields the scheme answers');
+    ok(found.policyNo&&String(found.policyNo.value)==='95768400','    policy number survives the OCR path');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

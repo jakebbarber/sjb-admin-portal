@@ -1,0 +1,471 @@
+/* ===========================================================================
+   RECOMMENDATION · DRAFTING ASSISTANT · CLIENT REPORT
+   The recommendation now lives in the Fact Find (Advice → Recommendation), so
+   it is captured where the adviser is already working, counts toward
+   completion, exports to CSV and flows into the MADS Apps Out sheet.
+   ========================================================================= */
+function recOf(c){ return (c.data&&c.data.recommendation)||c.rec||{}; }
+
+/* ------------------------- facts for the assistant ----------------------- */
+/* A compact, factual brief. Only what the drafting task needs — no bank
+   details, no ID numbers, nothing the narrative would never mention. */
+function aiFacts(c,opts){
+  opts=opts||{};
+  const L=[], base=cfBase(c);
+  const P=c.data.personal||{}, a=P.a1||{}, b=P.a2||{};
+  const R=(c.data.retirement||{}).a1||{}, R2=(c.data.retirement||{}).a2||{};
+  const Q=(c.data.risk||{}).a1||{}, J=c.data.journey||{}, E=c.data.employment||{}, X=c.data.incomeExp||{};
+  const r=recOf(c);
+  const add=(k,v)=>{ if(v!=null&&String(v).trim()!=='') L.push(k+': '+v); };
+  add('Client',[a.firstName,a.surname].filter(Boolean).join(' ')+(a.dob?' (age '+age(a.dob)+')':''));
+  if(b.firstName) add('Partner',[b.firstName,b.surname].filter(Boolean).join(' ')+(b.dob?' (age '+age(b.dob)+')':''));
+  add('Country of residence',a.residence); add('Country of tax residence',a.taxResidence);
+  add('Marital status',a.marital);
+  const kids=(c.data.dependants||[]).length; if(kids) add('Dependants',kids);
+  add('Occupation',(E.a1||{}).occupation);
+  if((E.a1||{}).salary) add('Gross salary',money((E.a1||{}).salary,(E.a1||{}).salaryCcy||base));
+  add('Where they intend to retire',R.retireCountry);
+  add('Intended retirement age',R.retireAge+(R2.retireAge?' (partner '+R2.retireAge+')':''));
+  if(R.desiredIncome) add('Desired net retirement income',money(R.desiredIncome,R.incomeCcy||base)+' a year'
+    +(R.covers?' ('+R.covers+')':''));
+  add('Attitude to risk',Q.atrChosen+(Q.atrScore?' (score '+Q.atrScore+'/40)':''));
+  add('Capacity for loss',Q.capacity); add('Investment time horizon',Q.horizon);
+  add('Investment experience',Q.experience); add('Investment objective',Q.objective);
+  add('Intends to withdraw income',Q.withdrawIncome);
+  add('Objectives in their own words',J.priorities);
+  add('Adviser summary of objectives',J.adviserSummary);
+  add('0-5 year plans',J.plan05); add('5-10 year plans',J.plan510);
+  /* holdings, summarised */
+  const pots=[];
+  (c.data.dcPensions||[]).forEach(p=>pots.push('pension '+(p.name||'')+' '+money(p.value,p.ccy||base)
+    +(p.type?' ('+p.type+')':'')));
+  (c.data.dbPensions||[]).forEach(p=>pots.push('final salary '+(p.name||'')+' paying '+money(p.income,p.ccy||base)+'/yr from '+(p.nra||'NRA')));
+  (c.data.investments||[]).forEach(p=>pots.push('investment '+(p.provider||'')+' '+money(p.value,p.ccy||base)+(p.type?' ('+p.type+')':'')));
+  (c.data.cash||[]).forEach(p=>pots.push('cash '+(p.bank||'')+' '+money(p.amount,p.ccy||base)));
+  if(pots.length) add('Existing holdings',pots.join('; '));
+  (c.data.statePensions||[]).forEach(p=>add('State pension',(p.country||'')+' '+money(p.amount,p.ccy||base)+'/yr from age '+(p.spa||'')));
+  if(X.expTotal) add('Current living expenditure',money(X.expTotal,base)+' a year');
+  if(X.expMortgage) add('Mortgage/rent',money(X.expMortgage,base)+' a year');
+  /* recommendation */
+  add('Recommended product',[r.product,r.provider].filter(Boolean).join(' with '));
+  add('Amount to be invested',r.amount?money(r.amount,r.ccy||base):'');
+  add('Regular contribution',r.regular?money(r.regular,r.ccy||base)+' a month':'');
+  add('Funded from',r.source); add('Investment strategy',r.strategy);
+  add('Initial fee',r.initial?r.initial+'%':''); add('Ongoing fee',r.ongoing?r.ongoing+'% a year':'');
+  add('Providers considered and discounted',r.discounted);
+  add('Type of advice',r.adviceType);
+  add('Other notes from the adviser',r.reason);
+  /* cashflow position */
+  if(opts.cashflow!==false){
+    try{
+      const s=cfSettings(c), res=cfRun(c,s,false);
+      if(res){
+        add('Cashflow — savings today',money(res.startTotal,base));
+        add('Cashflow — savings at first retirement ('+res.firstRetYear+')',money(res.atRetirement,base));
+        add('Cashflow — savings at age '+s.endAge,money(res.endTotal,base));
+        add('Cashflow — outcome',res.shortfallYear
+          ? ('money runs out in '+res.shortfallYear+' (age '+(res.shortfallYear-res.people[0].by)+')')
+          : ('money lasts to age '+s.endAge));
+        add('Cashflow — assumptions','inflation '+s.inflation+'%, investment growth '+s.growInvest
+          +'%, pension growth '+s.growPension+'%, returns '+(s.basis==='benchmark'?'varying on a historic market pattern':'a steady line'));
+        if(opts.mc){ const mc=cfMonteCarlo(c,s,150);
+          add('Cashflow — survives simulated markets',mc.success+'% of '+mc.n+' runs'); }
+      }
+    }catch(e){}
+  }
+  return L.join('\n');
+}
+async function aiDraft(kind,c,extra){
+  const body=Object.assign({kind,facts:aiFacts(c,extra&&extra.factOpts)},extra||{});
+  delete body.factOpts;
+  const r=await api('POST','/api/ai',body);
+  return r.text||'';
+}
+
+/* ------------- assistant panel inside the Recommendation section --------- */
+const AI_BOXES=[
+  {f:'lumpSumFactors',kind:'lumpSumFactors',label:'the client’s own words / most important factors'},
+  {f:'retirementNarrative',kind:'retirementNarrative',label:'the retirement goals paragraph'},
+  {f:'mainObjectives',kind:'mainObjectives',label:'the main objectives list'},
+  {f:'ukNarrative',kind:'ukNarrative',label:'the UK advice paragraph'}
+];
+const _extraPanelR=extraPanel;
+extraPanel=function(c,s){
+  if(s.id!=='recommendation'){ return _extraPanelR(c,s); }
+  const r=recOf(c);
+  let h='<div class="hr"></div>'
+    +'<div class="row" style="gap:9px;margin-bottom:8px"><span style="color:var(--blue)">'+ic('sliders',17)+'</span>'
+    +'<b>Draft with the assistant</b>'
+    +'<span class="tiny muted sp">Writes a first draft from this client’s Fact Find and cashflow. Read it, change it, make it yours.</span></div>'
+    +'<div class="row wrapf" style="gap:7px">'
+    +AI_BOXES.map(x=>'<button class="btn sm" data-a="aiDraft" data-v="'+x.f+'">'
+      +ic('file',14)+' '+esc(x.label)+(r[x.f]?' · redraft':'')+'</button>').join('')
+    +'<button class="btn sm dark" data-a="aiDraftAll">'+ic('sliders',14)+' Draft all four</button>'
+    +'</div>'
+    +'<div class="note mut mt-s"><span class="ic">'+ic('info',15)+'</span><div>Drafts are produced by the assistant '
+    +'running on your own Cloudflare account. Nothing is sent to any other service. The words remain your '
+    +'responsibility — check every figure and claim before this reaches a client file.</div></div>';
+  return h;
+};
+
+/* ------------------------- cashflow client report ------------------------
+   The structure is CashCalc's, because that is what the advisers and their
+   clients already know how to read: a landscape cover, section pages with a
+   rail carrying the labels beside their blocks, full-width chart pages, a
+   footer on every page, a back cover. The skin is SJB's: charcoal, blue and
+   orange, set in Manrope, with the at-a-glance strip from the portal. One
+   run of pages per plan, as CashCalc repeats per forecast.
+   ------------------------------------------------------------------------- */
+/* The portal embeds Manrope as a data URI; lift that rule so the report is set
+   in the same face without reaching for a font CDN. */
+function docFontCss(){
+  try{
+    for(const ss of document.styleSheets){
+      let rules; try{ rules=ss.cssRules; }catch(e){ continue; }
+      for(const r of rules){
+        if(r.type===CSSRule.FONT_FACE_RULE&&/manrope/i.test(r.style.getPropertyValue('font-family'))) return r.cssText;
+      }
+    }
+  }catch(e){}
+  return '';
+}
+function docCss(){
+  return docFontCss()
+  +':root{--char:#1D2E38;--deep:#0F1A22;--blue:#1D75BD;--orange:#F47920;--cream:#FCF9F4;--ink:#1D2E38;--ink-2:#4A5A64;'
+    +'--ink-3:#72838C;--line:#DDE3E7;--grey:#F3F5F7;--green:#2E8B3D;--red:#D9463B}'
+  +'*{box-sizing:border-box}'
+  +'body{margin:0;background:#8A9199;font-family:Manrope,"Segoe UI",Arial,sans-serif;color:var(--ink);font-size:10.5pt;line-height:1.5;'
+    +'-webkit-print-color-adjust:exact;print-color-adjust:exact}'
+  +'.sheet{width:297mm;height:210mm;background:#fff;margin:10mm auto;position:relative;overflow:hidden;'
+    +'box-shadow:0 4px 18px rgba(0,0,0,.25);break-after:page;page-break-after:always}'
+  +'.sheet:last-child{break-after:auto;page-break-after:auto}'
+  +'@media print{body{background:#fff}.sheet{margin:0;box-shadow:none}.printbar{display:none}}'
+  +'@page{size:A4 landscape;margin:0}'
+  /* cover: white strip, then the charcoal band that every SJB document carries */
+  +'.cover .top{height:58mm;padding:13mm 16mm 0;display:flex;justify-content:space-between;align-items:flex-start}'
+  +'.cover .names{font-size:22pt;font-weight:800;line-height:1.12;letter-spacing:-.01em;max-width:170mm}'
+  +'.cover .kind{font-size:14pt;font-weight:600;color:var(--blue);margin-top:7mm}'
+  +'.cover .date{font-size:8.5pt;font-weight:700;color:var(--ink-3);letter-spacing:.14em;margin-top:2mm;text-transform:uppercase}'
+  +'.cover .rt{text-align:right}.cover .rt img{height:14mm;width:auto}.cover .by{font-size:9.5pt;color:var(--ink-2);margin-top:12mm}'
+  +'.cover .band{position:absolute;left:0;right:0;top:58mm;bottom:0;background:linear-gradient(135deg,var(--char),var(--deep));'
+    +'padding:18mm 18mm 16mm;color:#fff}'
+  +'.cover .band img{height:17mm;width:auto;filter:brightness(0) invert(1);opacity:.95}'
+  +'.cover .band h1{font-size:27pt;font-weight:800;line-height:1.1;letter-spacing:-.01em;margin:14mm 0 0;max-width:165mm}'
+  +'.cover .orule{width:42mm;height:3px;background:var(--orange);margin:8mm 0 7mm}'
+  +'.cover .pf{font-size:12.5pt;color:rgba(255,255,255,.88)}.cover .pf b{color:#fff;font-weight:800}'
+  +'.cover .pf2{font-size:9.5pt;color:rgba(255,255,255,.6);margin-top:2.5mm;letter-spacing:.02em}'
+  /* section pages: charcoal rail, labels beside their blocks, one gradient rule */
+  +'.rail{position:absolute;left:0;top:0;bottom:0;width:52mm;background:var(--char)}'
+  +'.rule{position:absolute;left:63mm;top:36mm;bottom:18mm;width:1.5px;background:linear-gradient(var(--orange),var(--blue))}'
+  +'.rows{position:absolute;left:0;right:12mm;top:36mm;bottom:20mm;display:grid;grid-template-columns:52mm 1fr;align-content:start;row-gap:10mm}'
+  +'.lab{padding-left:11mm;color:#fff;font-weight:800;font-size:12pt;line-height:1.3;letter-spacing:-.01em}'
+  +'.ct{padding-left:21mm;min-width:0}'
+  +'p{margin:0 0 3.5mm}'
+  +'.fine{font-size:7.5pt;font-style:italic;font-weight:600;color:var(--ink-2)}'
+  +'.kv{display:flex;justify-content:space-between;align-items:baseline;margin:1.4mm 0}.kv b{font-weight:800;white-space:nowrap;margin-left:8mm}'
+  /* the at-a-glance strip from the portal, so the report reads as ours */
+  +'.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:4mm;margin:2mm 0 1mm}'
+  +'.kpi{border:1px solid var(--line);border-left:3px solid var(--orange);padding:3.5mm 4.5mm;background:#fff}'
+  +'.kpi .l{font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3)}'
+  +'.kpi .v{font-size:14pt;font-weight:800;margin-top:1.5mm;letter-spacing:-.01em}.kpi .v.bad{color:var(--red)}.kpi .v.good{color:var(--green)}'
+  +'.kpi .s{font-size:7.5pt;color:var(--ink-3);margin-top:.5mm}'
+  +'table{width:100%;border-collapse:collapse;font-size:9.5pt}'
+  +'th{background:var(--grey);text-align:left;font-weight:700;font-size:8.5pt;color:var(--ink-2);padding:2.2mm 2.4mm;border:1px solid var(--line);vertical-align:top}'
+  +'td{padding:2.2mm 2.4mm;border:1px solid var(--line);vertical-align:top}'
+  +'tr:nth-child(even) td{background:#FAFBFC}td.n,th.n{text-align:right;white-space:nowrap}'
+  +'.g{color:var(--green)}.r{color:var(--red)}.b{font-weight:800}'
+  +'.pfoot{position:absolute;left:64mm;right:12mm;bottom:8mm;font-size:7pt;color:var(--ink-2);display:flex;justify-content:space-between;align-items:flex-end}'
+  +'.pfoot .who{position:absolute;left:-53mm;bottom:0;width:38mm;color:rgba(255,255,255,.85);line-height:1.3;font-size:6.5pt}'
+  +'.pfoot .pn{font-size:10pt;font-weight:700;color:var(--ink)}'
+  +'.pfoot .pn:after{content:"";display:block;width:22mm;height:1.5px;margin:1.5mm 0 0 auto;background:linear-gradient(90deg,var(--orange),var(--blue))}'
+  /* full-width pages */
+  +'.full{padding:18mm 16mm 18mm}'
+  +'.full h2{font-size:16pt;font-weight:800;letter-spacing:-.01em;margin:0}'
+  +'.full h2:after{content:"";display:block;width:70mm;height:2px;margin-top:3.5mm;background:linear-gradient(90deg,var(--orange),var(--blue))}'
+  +'.full .chart{margin-top:8mm}.full .chart svg{width:100%;height:auto;max-height:118mm}'
+  +'.full .kpis{margin-top:8mm}'
+  +'.full .pfoot{left:16mm}.full .pfoot .who{position:static;color:var(--ink-2);width:auto}'
+  /* back cover */
+  +'.back{background:linear-gradient(135deg,var(--char),var(--deep))}'
+  +'.back:before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:var(--orange)}'
+  +'.back .card{position:absolute;left:14mm;bottom:14mm;width:142mm;background:var(--cream);padding:12mm 12mm 11mm;color:var(--ink)}'
+  +'.back .card img{height:16mm;width:auto;margin-bottom:8mm}'
+  +'.back h1{font-size:19pt;font-weight:800;letter-spacing:-.01em;margin:0 0 2.5mm}.back .s{font-size:12pt;font-weight:600;color:var(--blue);margin-bottom:3.5mm}'
+  +'.back p{font-size:9pt;color:var(--ink-2);margin:0}.back .site{font-size:8pt;font-weight:700;letter-spacing:.1em;color:var(--ink-3);margin-top:8mm;text-transform:uppercase}'
+  /* the chart legends use the portal's layout classes, which this document has to supply itself */
+  +'.row{display:flex;align-items:center}.wrapf{flex-wrap:wrap}.tiny{font-size:8.5pt}.muted{color:var(--ink-2)}'
+  +'.printbar{position:fixed;top:10px;right:10px;z-index:9}.printbar button{padding:10px 18px;border:0;border-radius:9px;background:var(--orange);color:#fff;font:inherit;font-weight:800;cursor:pointer}';
+}
+function openDoc(title,body,filename){
+  const html='<!doctype html><html><head><meta charset="utf-8"><title>'+esc(title)+'</title><style>'+docCss()+'</style></head>'
+    +'<body><div class="printbar"><button onclick="window.print()">Print / Save as PDF</button></div>'
+    +body+'</body></html>';
+  const w=window.open('','_blank');
+  if(w&&w.document){ w.document.write(html); w.document.close(); }
+  else{
+    const b=new Blob([html],{type:'text/html'});
+    const u=URL.createObjectURL(b), a=document.createElement('a');
+    a.href=u; a.download=filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),2000);
+    toast('Report downloaded','Open the file and use Print → Save as PDF.');
+  }
+}
+/* split a list into pages of n */
+function docChunk(list,n){ const out=[]; for(let i=0;i<list.length;i+=n) out.push(list.slice(i,i+n)); return out.length?out:[[]]; }
+
+function cfClientReport(c,narrative){
+  const s0=cfSettings(c);
+  const res0=cfRun(c,s0,false);
+  if(!res0){ toast('Add a date of birth first','The forecast needs Applicant 1’s date of birth.','warn'); return; }
+  const base=res0.base;
+  const names=clientName(c);
+  const adviser=(AUTH_USER&&AUTH_USER.name)||CFG.org;
+  const org=CFG.org||'SJB Global';
+  const today=fdate(new Date());
+  const y0=new Date().getFullYear();
+  const SC=cfScenarios(c);
+  const sheets=[];
+  const moneyWord=r=>r.realTerms?'in today’s money':'rising with inflation';
+
+  /* every section page: the rail, the labels beside their blocks, the footer */
+  const page=(blocks,forecastName)=>{
+    let h='<div class="sheet"><div class="rail"></div><div class="rule"></div><div class="rows">';
+    blocks.forEach(b=>{ h+='<div class="lab">'+(b.label||'')+'</div><div class="ct">'+b.html+'</div>'; });
+    h+='</div><div class="pfoot"><div class="who">Cashflow Forecast for '+esc(names)+'</div>'
+      +'<div>'+(forecastName?'<b>'+esc(forecastName)+'</b><br>':'')+esc(today)+'. Created by '+esc(adviser)+' of '+esc(org)+'</div>'
+      +'<div class="pn">Page {{PN}} | {{PT}}</div></div></div>';
+    sheets.push(h);
+  };
+  const fullPage=(title,html,forecastName)=>{
+    sheets.push('<div class="sheet full"><h2>'+esc(title)+'</h2>'+html
+      +'<div class="pfoot"><div class="who">Cashflow Forecast for '+esc(names)+'</div>'
+      +'<div>'+(forecastName?'<b>'+esc(forecastName)+'</b><br>':'')+esc(today)+'. Created by '+esc(adviser)+' of '+esc(org)+'</div>'
+      +'<div class="pn">Page {{PN}} | {{PT}}</div></div></div>');
+  };
+  const kpiStrip=(res,s)=>{
+    const p0=res.people[0];
+    return '<div class="kpis">'
+      +'<div class="kpi"><div class="l">Savings today</div><div class="v">'+money(res.startTotal,base)+'</div></div>'
+      +'<div class="kpi"><div class="l">At first retirement</div><div class="v">'+money(res.atRetirement,base)+'</div><div class="s">'+res.firstRetYear+', age '+(res.firstRetYear-p0.by)+'</div></div>'
+      +'<div class="kpi"><div class="l">At age '+s.endAge+'</div><div class="v">'+money(res.endTotal,base)+'</div></div>'
+      +(res.shortfallYear
+        ?'<div class="kpi"><div class="l">Money runs out</div><div class="v bad">'+res.shortfallYear+'</div><div class="s">age '+(res.shortfallYear-p0.by)+' for '+esc(p0.name)+'</div></div>'
+        :'<div class="kpi"><div class="l">Shortfall</div><div class="v good">None</div><div class="s">money lasts to age '+s.endAge+'</div></div>')
+      +'</div>';
+  };
+
+  /* ---- cover ---- */
+  sheets.push('<div class="sheet cover"><div class="top"><div>'
+    +'<div class="names">'+esc(names).replace(' & ',' &amp;<br>')+'</div>'
+    +'<div class="kind">Cashflow Forecast</div><div class="date">'+esc(today)+'</div></div>'
+    +'<div class="rt">'+logo(53)+'<div class="by">Created by '+esc(adviser)+' | '+esc(org)+'</div></div></div>'
+    +'<div class="band">'+logo(64)
+    +'<h1>Your lifetime cashflow forecast</h1><div class="orule"></div>'
+    +'<div class="pf">Prepared for <b>'+esc(names)+'</b></div>'
+    +'<div class="pf2">'+esc(adviser)+' · '+esc(org)+' · '+esc(today)+'</div></div></div>');
+
+  /* ---- introduction & overview ---- */
+  page([
+    {label:'Introduction',html:
+      '<p>The following report contains a lifetime Cash Flow forecast. This analyses your incomes, expenditures, savings '
+      +'and investments to illustrate whether certain financial objectives are achievable, and how certain decisions '
+      +'regarding your finances will be likely to affect you many years down the line.</p>'
+      +'<p>Throughout this report many assumptions have been made, including the anticipated rate of inflation and an '
+      +'estimated investment return rate. In reality, these figures may fluctuate and have a significant impact on your '
+      +'finances in comparison to those shown. We recommend regularly reviewing the assumptions made in this report for '
+      +'the most accurate forecast.</p>'
+      +'<p>All figures are shown <b>before tax</b>. '+(res0.realTerms
+        ?'They are in <b>today’s terms</b> (sometimes referred to as real terms), which means they have been adjusted to '
+         +'take into account the assumed rate of inflation.'
+        :'Amounts <b>rise each year with the assumed rate of inflation</b>, so what you see is the figure expected in that '
+         +'year rather than its value in today’s money.')+'</p>'},
+    {label:'Overview',html:
+      '<p>Forecasts included:</p>'
+      +SC.map(x=>'<p style="margin:0 0 1mm 6mm">- '+esc(names)+(x.base?'':' - '+esc(x.name).toUpperCase())+'</p>').join('')
+      +'<p class="fine" style="margin-top:5mm">(A forecast in this context is an alternative cashflow model and can be used to '
+      +'see how different financial decisions can affect you in the future.)</p>'}
+  ]);
+  if(narrative) page([{label:'Summary',html:narrative.split(/\n{2,}/).map(p=>'<p>'+esc(p.trim())+'</p>').join('')}]);
+
+  /* ---- one run of pages per plan ---- */
+  SC.forEach(sc=>{
+    const s=cfSettings(c,sc.id);
+    const res=cfRun(c,s,false);
+    if(!res) return;
+    const fname=names+(sc.base?'':' - '+sc.name.toUpperCase());
+    const p0=res.people[0];
+    const ageNow=k=>{ const p=res.people.find(x=>x.key===k)||p0; return y0-p.by; };
+    const startAge=y0-p0.by, retAge=res.firstRetYear-p0.by, endAge=Number(s.endAge);
+    const inflOf=x=>x.kind==='salary'?'Salary growth ('+Number(s.salaryGrowth)+'%)'
+      :x.inflates?'Assumed ('+Number(s.inflation)+'%)':'Level (0%)';
+    const defB=cfBenchFor(c);
+
+    /* forecast + assumptions + savings */
+    const assume='<div class="kv"><span>Start date</span><b>'+esc(today)+'</b></div>'
+      +'<div class="fine">Note: the first year is a partial year. Growth rates, inflation rates and transaction amounts are '
+      +'reduced to reflect this.</div>'
+      +'<div class="kv"><span>Assumed inflation rate</span><b>'+Number(s.inflation)+'%</b></div>'
+      +'<div class="kv"><span>Total savings at start (age '+startAge+')</span><b>'+money(res.startTotal,base)+'</b></div>'
+      +'<div class="kv"><span>Total savings at retirement (age '+retAge+')</span><b>'+money(res.atRetirement,base)+'</b></div>'
+      +'<div class="kv"><span>Total savings at end (age '+endAge+')</span><b>'+money(res.endTotal,base)+'</b></div>'
+      +'<div class="kv"><span>Surplus income to save, per year</span><b>100%</b></div>'
+      +(res.shortfallYear?'<div class="kv"><span>Savings run out</span><b class="r">'+res.shortfallYear+' (age '+(res.shortfallYear-p0.by)+')</b></div>':'')
+      +'<div class="fine">Note: All contributions, withdrawals, incomes and expenditures below are based around '+esc(p0.name)+'’s age. '
+      +'Figures are before tax, '+moneyWord(res)+'.</div>';
+    const potRows=res.inp.pots.map(p=>{
+      const own=(s.growth||{})[p.id];
+      const g=(own!=null&&own!=='')?Number(own):(p.type==='cash'?Number(s.growCash):p.type==='invest'?Number(s.growInvest):Number(s.growPension));
+      const fee=p.type==='cash'?0:cfFeeFor(s,p.id);
+      const net=g-fee;
+      const bench=s.basis==='benchmark'&&p.type!=='cash';
+      const ret=bench?esc((CF_BENCH[s.potBench[p.id]||defB]||CF_BENCH.balanced).name)+' (1990-2024)':net.toFixed(2)+'%';
+      const real=bench?'Variable':(net-Number(s.inflation)).toFixed(2)+'%';
+      return '<tr><td>'+esc(p.label)+'</td><td class="n">'+money(p.value,base)+'</td><td>'+ret+'</td>'
+        +'<td class="n">'+(p.type==='cash'?'-':fee.toFixed(2)+'%')+'</td><td class="n">'+real+'</td></tr>';
+    });
+    const potHead='<tr><th>Description</th><th class="n">Starting Amount</th><th>Net Investment Return</th><th class="n">Charges</th><th class="n">Real Return Rate</th></tr>';
+    const potPages=docChunk(potRows,4);
+    page([{label:'Forecast',html:'<p>'+esc(fname)+'</p>'+kpiStrip(res,s)},{label:'Assumptions',html:assume},
+      {label:'Savings &amp; Investments',html:'<table>'+potHead+potPages[0].join('')+'</table>'}],fname);
+    potPages.slice(1).forEach(rows=>page([{label:'',html:'<table>'+potHead+rows.join('')+'</table>'}],fname));
+
+    /* incomes + expenses */
+    const incRows=res.inp.incomes.map(x=>{
+      const from=x.fromAge!=null?x.fromAge:ageNow(x.owner||p0.key);
+      const to=x.untilAge!=null?x.untilAge:endAge;
+      return '<tr><td class="n">'+from+'</td><td class="n">'+to+'</td><td>'+esc(x.label)+'</td>'
+        +'<td class="n g">'+money(x.annual,base)+' per year</td><td>'+esc(inflOf(x))+'</td></tr>';
+    }).concat((s.events||[]).filter(ev=>ev.dir!=='out').map(ev=>
+      '<tr><td class="n">'+(Number(ev.year)-p0.by)+'</td><td class="n">'+(Number(ev.year)-p0.by)+'</td><td>'+esc(ev.label||'One-off money in')+'</td>'
+        +'<td class="n g">'+money(cfToBase(c,s,ev.amount,ev.ccy),base)+' once</td><td>-</td></tr>'));
+    const expRows=res.inp.spends.map(x=>{
+      const from=x.fromT!=null?startAge+x.fromT:startAge;
+      const to=x.years!=null?startAge+x.years-1:endAge;
+      return '<tr><td class="n">'+from+'</td><td class="n">'+to+'</td><td>'+esc(x.label)+'</td>'
+        +'<td class="n r">'+money(x.annual,base)+' per year</td><td>'+esc(inflOf(x))+'</td></tr>';
+    }).concat((s.events||[]).filter(ev=>ev.dir==='out').map(ev=>
+      '<tr><td class="n">'+(Number(ev.year)-p0.by)+'</td><td class="n">'+(Number(ev.year)-p0.by)+'</td><td>'+esc(ev.label||'One-off money out')+'</td>'
+        +'<td class="n r">'+money(cfToBase(c,s,ev.amount,ev.ccy),base)+' once</td><td>-</td></tr>'));
+    const ieHead='<tr><th class="n">Start Age</th><th class="n">End Age</th><th>Description</th><th class="n">Net Amount</th><th>Inflation Rate</th></tr>';
+    const tbl=rows=>'<table>'+ieHead+(rows.length?rows.join(''):'<tr><td colspan="5">None recorded.</td></tr>')+'</table>';
+    const ieNote='<p class="fine" style="margin-top:3mm">Amounts are today’s figures; each line rises every year at the rate shown.</p>';
+    if(incRows.length+expRows.length<=9){
+      page([{label:'Incomes',html:tbl(incRows)},{label:'Expenses',html:tbl(expRows)+ieNote}],fname);
+    } else {
+      docChunk(incRows,8).forEach((rows,i)=>page([{label:i?'':'Incomes',html:tbl(rows)}],fname));
+      docChunk(expRows,8).forEach((rows,i)=>page([{label:i?'':'Expenses',html:tbl(rows)+ieNote}],fname));
+    }
+
+    /* charges & fees */
+    const feeRows=[];
+    res.inp.pots.filter(p=>p.type!=='cash').forEach(p=>{
+      feeRows.push('<tr><td class="n">'+startAge+'</td><td class="n">'+endAge+'</td><td>Ongoing charges'+(cfFeeCustom(s,p.id)?'':' (default)')+'</td>'
+        +'<td>'+esc(p.label)+'</td><td class="n">'+cfFeeFor(s,p.id).toFixed(2)+'% per year</td><td>Level (0%)</td></tr>');
+      const f=cfInitFee(s,p.id);
+      if(f) feeRows.push('<tr><td class="n">'+(startAge+f.year)+'</td><td class="n">'+(startAge+f.year)+'</td><td>Initial fee</td>'
+        +'<td>'+esc(p.label)+'</td><td class="n">'+f.pct+'% once</td><td>-</td></tr>');
+    });
+    const feeHead='<tr><th class="n">Start Age</th><th class="n">End Age</th><th>Description</th><th>Platform / Draw From</th><th class="n">Net Amount</th><th>Inflation Rate</th></tr>';
+    docChunk(feeRows,10).forEach((rows,i)=>page([{label:i?'':'Charges &amp; Fees',
+      html:'<table>'+feeHead+(rows.length?rows.join(''):'<tr><td colspan="6">No charges recorded.</td></tr>')+'</table>'
+        +(i?'':'<p class="fine" style="margin-top:4mm">Charges come off each pot’s growth every year. The default is set on the '
+          +'plan; a pot given its own figure uses that instead.</p>')}],fname));
+
+    /* the two charts, full width */
+    fullPage('Cash Flow Forecast','<div class="chart">'+cfChartFlow(res)+'</div>',fname);
+    fullPage('Savings Over Time','<div class="chart">'+cfChartSavings(res,null)+'</div>',fname);
+
+    /* yearly breakdown */
+    const yHead='<tr><th class="n">Year</th><th class="n">Age'+(res.people.length>1?'s':'')+'</th><th class="n">Income</th><th class="n">Expenses</th>'
+      +'<th class="n">Surplus / Deficit</th><th class="n">Drawn from Savings</th><th class="n">Cash</th><th class="n">Investments</th>'
+      +'<th class="n">Pensions</th><th class="n">Total Savings</th></tr>';
+    const yRows=res.rows.map(r=>'<tr'+(r.shortfall>0?' style="color:var(--red)"':'')+'><td class="n">'+r.year+'</td>'
+      +'<td class="n">'+res.people.map(p=>r.ages[p.key]).join(' / ')+'</td>'
+      +'<td class="n">'+money(r.income,base)+'</td><td class="n">'+money(r.expenses,base)+'</td>'
+      +'<td class="n '+(r.net>=0?'g':'r')+'">'+money(r.net,base)+'</td><td class="n">'+(r.drawn>0?money(r.drawn,base):'-')+'</td>'
+      +'<td class="n">'+money(r.cash,base)+'</td><td class="n">'+money(r.invest,base)+'</td><td class="n">'+money(r.pension,base)+'</td>'
+      +'<td class="n b">'+money(r.total,base)+'</td></tr>');
+    docChunk(yRows,20).forEach((rows,i)=>page([{label:i?'':'Yearly Breakdown',
+      html:(i?'':'<p class="fine" style="margin:0 0 3mm">Figures are before tax, '+moneyWord(res)+'.</p>')
+        +'<table style="font-size:8.5pt">'+yHead+rows.join('')+'</table>'}],fname));
+  });
+
+  /* ---- how it behaves in real markets (base plan) ---- */
+  const mc=cfMonteCarlo(c,s0,200);
+  if(mc) fullPage('Stress Test',
+    '<p style="margin-top:4mm">The forecast assumes markets behave as assumed each year. They will not. The same plan was run '
+    +'through '+mc.n+' simulated markets with realistic ups and downs; the shaded band shows where nine in ten of those runs sat.</p>'
+    +'<div class="kpis"><div class="kpi"><div class="l">Plans that never ran out</div><div class="v'
+      +(mc.success>=85?' good':mc.success>=60?'':' bad')+'">'+mc.success+'%</div><div class="s">of '+mc.n+' simulated markets</div></div>'
+    +'<div class="kpi"><div class="l">Middle outcome at age '+s0.endAge+'</div><div class="v">'+money(mc.band[mc.band.length-1].p50,base)+'</div><div class="s">half do better, half worse</div></div>'
+    +'<div class="kpi"><div class="l">1-in-10 poor outcome</div><div class="v">'+money(mc.band[mc.band.length-1].p10,base)+'</div><div class="s">plan for this, hope for better</div></div>'
+    +'<div class="kpi"><div class="l">Worst fall along the way</div><div class="v">'+Math.round(mc.worstDD*100)+'%</div><div class="s">biggest drop from a previous high</div></div></div>'
+    +'<div class="chart" style="margin-top:6mm">'+cfChartSavings(res0,mc)+'</div>',
+    names);
+
+  /* ---- important information ---- */
+  page([{label:'Important information',html:
+    '<p>This forecast is an illustration, not a guarantee or a personal recommendation in itself. The value of investments '
+    +'can fall as well as rise and you may get back less than you invest.</p>'
+    +'<p>Figures rely on the assumptions shown, on the accuracy of the information you have given us, and on fixed exchange '
+    +'rates for holdings in other currencies; actual exchange rates will vary. All figures are shown before tax; your tax '
+    +'position depends on your individual circumstances and where you are resident, and may change.</p>'
+    +'<p>Prepared by '+esc(adviser)+', '+esc(org)+(CFG.network?', part of the '+esc(CFG.network)+' group':'')+'.</p>'}]);
+
+  /* ---- back cover ---- */
+  sheets.push('<div class="sheet back"><div class="card">'+logo(60)
+    +'<h1>Your Goals, Our Mission</h1><div class="s">Wherever You Are Today.</div>'
+    +'<p>We are committed to providing an expert and personal experience as we work with you to become financially '
+    +'prepared throughout your life transitions.</p>'
+    +'<div class="site">'+esc(org)+'</div></div></div>');
+
+  /* page numbers: the cover and back cover are not numbered but count */
+  const total=sheets.length;
+  const body=sheets.map((h,i)=>h.split('{{PN}}').join(String(i+1)).split('{{PT}}').join(String(total))).join('');
+  openDoc('Cashflow forecast — '+names,body,'Cashflow Forecast - '+names.replace(/[\\/:*?"<>|]/g,'')+'.html');
+}
+
+/* -------------------------------- actions -------------------------------- */
+Object.assign(ACT,{
+  async aiDraft(v){
+    const c=getClient(S.clientId); if(!c) return;
+    const box=AI_BOXES.find(x=>x.f===v); if(!box) return;
+    const r=recOf(c);
+    toast('Drafting','The assistant is writing '+box.label+'…');
+    try{
+      const text=await aiDraft(box.kind,c,{onTrack:r.retirementOnTrack||'Not on track',adviceType:r.adviceType});
+      if(!text){ toast('Nothing came back','Try again, or write it yourself.','warn'); return; }
+      c.data.recommendation=c.data.recommendation||{};
+      c.data.recommendation[v]=text;
+      touch(c); render();
+      toast('Draft ready','Read it through and edit it — it is a starting point, not a final answer.',null,7000);
+    }catch(e){ toast('Could not draft it',e.message,'risk',8000); }
+  },
+  async aiDraftAll(){
+    const c=getClient(S.clientId); if(!c) return;
+    const r=recOf(c);
+    toast('Drafting','Writing all four sections — this takes a few seconds…');
+    c.data.recommendation=c.data.recommendation||{};
+    let done=0,failed=0;
+    for(const box of AI_BOXES){
+      try{
+        const text=await aiDraft(box.kind,c,{onTrack:r.retirementOnTrack||'Not on track',adviceType:r.adviceType});
+        if(text){ c.data.recommendation[box.f]=text; done++; }
+      }catch(e){ failed++; }
+    }
+    touch(c); render();
+    if(done) toast('Drafts ready',done+' section'+(done===1?'':'s')+' written'+(failed?', '+failed+' failed':'')
+      +'. Read every one before it goes near a client file.',failed?'warn':null,8000);
+    else toast('Could not draft','The assistant did not respond.','risk');
+  },
+  async cfReport(){
+    const c=getClient(S.clientId); if(!c) return;
+    let narrative='';
+    try{
+      toast('Building the report','Asking the assistant for the client-facing summary…');
+      narrative=await aiDraft('reportNarrative',c,{factOpts:{mc:true}});
+    }catch(e){ /* the report is still worth having without it */ }
+    cfClientReport(c,narrative);
+    if(!narrative) toast('Report ready','Written without the assistant’s summary — it was unavailable.','warn');
+  }
+});

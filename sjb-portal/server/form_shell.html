@@ -1,0 +1,45 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your Fact Find — SJB Global</title>
+<style>
+@font-face{font-family:'Manrope';font-style:normal;font-weight:200 800;font-display:swap;src:url(data:font/woff2;base64,__MANROPE_B64__) format('woff2');}
+__FORM_CSS__
+</style></head><body>
+<div class="wrap"><div class="head"><img src="__SJB_LOGO_DATA_URI__" alt="SJB Global" style="height:24px"><span class="hn">SJB Global</span><span class="hr2" id="refTag"></span></div>
+<div id="croot"><div class="hero"><p class="mut">Loading your Fact Find…</p></div></div></div>
+<script src="/shared.js"></script>
+<script>
+__CLIENT_APP__
+window.SJB_FORM_BOOT=async function(){
+  const token=(location.pathname.match(/\/f\/([A-Za-z0-9_-]+)/)||[])[1];
+  const root=document.getElementById('croot');
+  const fail=msg=>{ root.innerHTML='<div class="hero"><h2>This link will not open</h2><p class="lead">'+msg+'</p>'
+    +'<p class="mut">Please contact your adviser at SJB Global and they will send you a fresh link.</p></div>'; };
+  if(!token) return fail('The address is incomplete.');
+  let ctx;
+  try{
+    const res=await fetch('/api/form/'+token,{credentials:'same-origin'});
+    const body=await res.json().catch(()=>({}));
+    if(!res.ok) return fail(body.error||'The link is not valid.');
+    ctx=body;
+  }catch(e){ return fail('We could not reach the server. Check your connection and try again.'); }
+  const S=window.SJB_SHARED;
+  document.getElementById('refTag').textContent=ctx.ref||'';
+  const sections=S.CLIENT_SECTION_IDS.map(id=>{ const s=S.sectionById(id);
+    return {id:s.id,name:s.name,rows:s.rows?1:0,per:s.per||null,
+      fields:s.fields?S.clientFields(s.fields):null,
+      cols:s.cols?S.clientFields(s.cols):null}; });
+  const lists={};
+  const collect=f=>{ if(f&&typeof f.list==='string'&&f.list!=='currency') lists[f.list]=S.listFor(f.list); };
+  sections.forEach(s=>{ (s.fields||[]).forEach(collect); (s.cols||[]).forEach(collect); });
+  SJB_CLIENT_APP({
+    org:ctx.org||'SJB Global', ref:ctx.ref, clientName:ctx.clientName, firstName:ctx.firstName, greetName:ctx.greetName||ctx.firstName, joint:!!ctx.joint,
+    adviserName:ctx.adviserName||'', adviserEmail:'', sections, copy:S.CLIENT_COPY, lists, currencies:S.CURRENCIES,
+    privacy:ctx.privacy||[], consent:ctx.consent||{},
+    logoImg:'<img src="__SJB_LOGO_DATA_URI__" alt="SJB Global" style="height:34px">',
+    data:ctx.data, submitUrl:'/api/form/'+token+'/submit'
+  });
+};
+SJB_FORM_BOOT();
+</script></body></html>

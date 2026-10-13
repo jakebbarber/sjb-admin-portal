@@ -1,0 +1,107 @@
+<!doctype html><meta charset="utf-8"><title>report merge test</title>
+<script>
+window.__runRep=async function(){
+  const L=[]; const say=s=>L.push(s);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+    say('logged in');
+
+    // a realistic UK pension-transfer client
+    const c=blankClient(); const r=()=>uid('r');
+    c.data.meta={ffDate:'2026-08-23',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={title:'Mr',firstName:'James',surname:'Whitfield',dob:'1968-06-15',marital:'Married',
+      residence:'Spain',taxResidence:'Spain',nationality:'British',health:'Good',smoker:'Non-smoker'};
+    c.data.employment.a1={occupation:'Engineer',salary:'82000',bonus:'8000',salaryCcy:'GBP',status:'Employed'};
+    c.data.retirement.a1={retireAge:'62',retireCountry:'Spain',desiredIncome:'45000',incomeCcy:'GBP'};
+    c.data.dependants=[{_id:r(),name:'Ella Whitfield',dob:'2005-02-01'},{_id:r(),name:'Sam Whitfield',dob:'2008-09-12'}];
+    c.data.estate.a1={will:'Yes',willCurrent:'Yes'};
+    c.data.risk.a1={atrChosen:'Balanced',atrScore:'24',capacity:'Medium',horizon:'10-15 years'};
+    c.data.incomeExp={expTotal:'42000',expMortgage:'14000',expLoans:'3000',expCards:'1200'};
+    c.data.dcPensions=[
+      {_id:r(),owner:'Applicant 1',name:'Aviva Personal Pension',policyNo:'AV-118822',ccy:'GBP',value:'214000',
+       tvq:'214000',tvqDate:'2026-07-14',amc:'1.05',exitFee:'None',guarantees:'None',nmpa:'55'},
+      {_id:r(),owner:'Applicant 1',name:'Scottish Widows Retirement Account',policyNo:'SW-771203',ccy:'GBP',
+       value:'96500',tvq:'96500',tvqDate:'2026-07-20',amc:'0.85',exitFee:'None',guarantees:'None',nmpa:'55'}
+    ];
+    c.data.recommendation={adviceType:'UK pension transfer (DB & DC)',provider:'Novia Global',
+      product:'International SIPP',ccy:'GBP',amount:'310500',strategy:'Corrival Balanced Portfolio',
+      source:'Transfer of the Aviva and Scottish Widows plans',
+      initial:'3',ongoing:'1',platformFee:'0.34',ocf:'0.30',
+      discounted:'UK-only SIPP providers were discounted as they do not accept non-UK resident members.',
+      mainObjectives:'- Consolidating your pensions into one pot',
+      ukNarrative:'James plans to retire in Spain at 62...'};
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+
+    // ---- values ----
+    const V=reportValues(c);
+    say('reportValues keys='+Object.keys(V).length);
+    ['UK PI DC 1 Pension Name ','UK PI DC 1 Value','UK PI DC 1 Annual Charges','UK PI DC 1 Date of TVQ',
+     'UK PI DC 2 Pension Name ','DC - Annual monetary amount 1','Reco PREMIUM INVESTED',
+     'Reco\nInitial Adviser fee monetary','Premium post initial fee','Total ongoing costs as a percentage',
+     'Total fees on plan ex. IFA fee','10 year RIY','Monetary difference 1','Pre to post  change 1',
+     'Income Individual Total Gross Income (from all above sources)',
+     'Expenditure Individual Annual surplus','UK Tax Payer','UK move abroad','Number of children',
+     'UK Risk profile','First Name','Surname','Date of birth','Adviser Name']
+      .forEach(k=>say('  '+k.replace(/\n/g,'\\n')+' = '+JSON.stringify(V[k])));
+
+    // ---- field resolution against the real template ----
+    const b64=document.getElementById('tplB64').textContent.trim();
+    const bin=atob(b64); const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+    const blob=new Blob([bytes]);
+    say('template bytes='+bytes.length);
+
+    const entries=readZip(bytes.buffer.slice(0));
+    const names=new Set();
+    for(const e of entries){ if(!/^word\/.*\.xml$/.test(e.name)) continue;
+      const xml=await entryText(e); const re=/MERGEFIELD\s+("?)([^"\\<]+)\1/g; let m;
+      while((m=re.exec(xml))) names.add(m[2].trim()); }
+    const resolve=buildFieldResolver(MADS_COLS);
+    const all=[...names];
+    const unresolved=all.filter(f=>!resolve(f));
+    const empty=all.filter(f=>{ const h=resolve(f); return h&&(V[h]==null||V[h]===''); });
+    say('template fields='+all.length+' unresolved='+unresolved.length+' resolved-but-empty='+empty.length
+      +' filled='+(all.length-unresolved.length-empty.length));
+    if(unresolved.length) say('  unresolved: '+unresolved.join(', '));
+    say('  empty sample: '+empty.slice(0,12).join(', '));
+
+    // ---- the merge itself ----
+    const t0=performance.now();
+    const out=await buildReport(blob,c,'novia');
+    say('buildReport ms='+Math.round(performance.now()-t0)+' filled='+out.stats.filled+' blank='+out.stats.blank
+      +' outBytes='+out.blob.size);
+
+    // ---- validate the produced docx ----
+    const back=readZip(await out.blob.arrayBuffer());
+    say('entries in/out='+entries.length+'/'+back.length);
+    const dp=new DOMParser(); let bad=0;
+    for(const e of back){ if(!/\.(xml|rels)$/.test(e.name)) continue;
+      const t=await entryText(e);
+      if(dp.parseFromString(t,'application/xml').querySelector('parsererror')) { bad++; say('  BAD XML: '+e.name); } }
+    say('unparseable parts='+bad);
+    const docXml=await entryText(back.find(e=>e.name==='word/document.xml'));
+    say('MERGEFIELD left in document='+(docXml.match(/MERGEFIELD/g)||[]).length+' (expect 0)');
+    say('fldChar left='+(docXml.match(/fldChar/g)||[]).length+' (expect 0)');
+    // did real values land?
+    ['James','Whitfield','Aviva Personal Pension','AV-118822','£214,000','Novia'].forEach(s=>{
+      say('  contains "'+s+'" = '+(docXml.indexOf(s)>=0));
+    });
+    window.__repOut=out.blob;
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

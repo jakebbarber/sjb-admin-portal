@@ -1,0 +1,583 @@
+/* ===========================================================================
+   STORE — everything lives in localStorage under one key. Saves are debounced
+   and the header shows when the last one landed, so you can tell at a glance
+   that your typing is safe.
+   ========================================================================= */
+const DB={ clients:[], requests:[], sends:[], settings:{}, v:1 };
+let SAVE_T=null, LAST_SAVE=null, STORE_OK=true, STORE_WARNED=false;
+
+/* Ask the question at start-up rather than discovering it on the first save.
+   Some contexts (private windows, sandboxed frames, data: URLs) refuse storage
+   outright, and this tool is worthless if it cannot keep what you type. */
+function probeStorage(){
+  try{
+    localStorage.setItem('__sjb_probe','1');
+    const ok=localStorage.getItem('__sjb_probe')==='1';
+    localStorage.removeItem('__sjb_probe');
+    STORE_OK=ok; return ok;
+  }catch(e){ STORE_OK=false; return false; }
+}
+
+function blankClient(name){
+  const d={};
+  SECTIONS.forEach(s=>{
+    if(s.rows) d[s.id]=[];
+    else if(s.per==='applicant') d[s.id]={a1:{},a2:{}};
+    else d[s.id]={};
+  });
+  d.meta.ffDate=iso(new Date());
+  d.meta.ffCurrency='GBP';
+  d.meta.adviser=DB.settings.adviserName||'';
+  d.meta.adviserEmail=DB.settings.adviserEmail||'';
+  return { id:uid('cl'), ref:nextRef(), name:name||'New client', joint:false,
+    status:'Fact Find in progress', created:new Date().toISOString(),
+    updated:new Date().toISOString(), data:d };
+}
+function nextRef(){
+  const y=new Date().getFullYear();
+  const n=DB.clients.filter(c=>(c.ref||'').indexOf('SJB-'+y)===0).length+1;
+  return 'SJB-'+y+'-'+String(n).padStart(3,'0');
+}
+function save(now){
+  clearTimeout(SAVE_T); SAVE_T=null;
+  const go=()=>{
+    try{
+      localStorage.setItem(CFG.storeKey,JSON.stringify(DB));
+      LAST_SAVE=new Date(); STORE_OK=true; flashSaved();
+    }catch(e){
+      const wasOK=STORE_OK;
+      STORE_OK=false;
+      /* Warn once, then let the standing banner carry the message — a toast
+         per keystroke would be noise at exactly the wrong moment. */
+      if(!STORE_WARNED){
+        STORE_WARNED=true;
+        toast('Nothing is being saved',
+          /quota/i.test(e.name||'')?'Storage is full. Export a backup, then delete clients you no longer need.'
+            :'This browser will not let the page store data. Export before you close the tab.','risk',12000);
+        if(wasOK) render();
+      }
+    }
+  };
+  if(now) go(); else SAVE_T=setTimeout(go,450);
+}
+function load(){
+  try{
+    const raw=localStorage.getItem(CFG.storeKey);
+    if(!raw) return false;
+    const o=JSON.parse(raw);
+    DB.clients=o.clients||[]; DB.requests=o.requests||[]; DB.sends=o.sends||[];
+    DB.settings=o.settings||{};
+    /* Fields added after a record was created simply appear empty. */
+    DB.clients.forEach(c=>{ c.data=c.data||{};
+      SECTIONS.forEach(s=>{
+        if(s.rows){ if(!Array.isArray(c.data[s.id])) c.data[s.id]=[]; }
+        else if(s.per==='applicant'){ const v=c.data[s.id]||{}; c.data[s.id]={a1:v.a1||{},a2:v.a2||{}}; }
+        else if(!c.data[s.id]||typeof c.data[s.id]!=='object') c.data[s.id]={};
+      });
+    });
+    return true;
+  }catch(e){ console.warn('load failed',e); return false; }
+}
+function flashSaved(){
+  const el=$('#savedFlag'); if(!el) return;
+  el.classList.add('on'); el.innerHTML=ic('check',13)+' Saved '+d2(LAST_SAVE.getHours())+':'+d2(LAST_SAVE.getMinutes());
+  clearTimeout(flashSaved._t); flashSaved._t=setTimeout(()=>el.classList.remove('on'),2600);
+}
+function getClient(id){ return DB.clients.find(c=>c.id===id)||null; }
+function touch(c){ c.updated=new Date().toISOString(); c.name=clientName(c); save(); }
+
+/* Display name is derived from the applicants, so it updates itself as the
+   Fact Find is filled in — never a separate field to keep in step. */
+function clientName(c){
+  const p=c.data.personal||{}, a=p.a1||{}, b=p.a2||{};
+  const n1=[a.firstName,a.surname].filter(Boolean).join(' ');
+  const n2=[b.firstName,b.surname].filter(Boolean).join(' ');
+  if(n1&&n2){ return a.surname&&a.surname===b.surname
+      ? a.firstName+' & '+b.firstName+' '+a.surname : n1+' & '+n2; }
+  return n1||n2||c.name||'Unnamed client';
+}
+function primaryEmail(c){ const p=c.data.personal||{}; return (p.a1||{}).email||(p.a2||{}).email||''; }
+function hasApplicant2(c){
+  const b=(c.data.personal||{}).a2||{};
+  return !!(b.firstName||b.surname||b.email||b.dob);
+}
+
+/* ------------------------------ completion ------------------------------ */
+function sectionStats(c,s){
+  let req=0,done=0,filled=0,total=0;
+  const count=(defs,vals)=>{
+    defs.forEach(fd=>{ total++;
+      const v=vals?vals[fd.id]:undefined;
+      const has=v!==undefined&&v!==null&&String(v).trim()!=='';
+      if(has) filled++;
+      if(fd.req){ req++; if(has) done++; }
+    });
+  };
+  if(s.rows){
+    const rows=c.data[s.id]||[];
+    rows.forEach(r=>count(s.cols,r));
+    /* A repeating section with no rows is complete only once it is confirmed
+       as intentionally empty — otherwise you cannot tell "none" from "not asked". */
+    const declared=(c.declared||{})[s.id];
+    if(!rows.length) return {pct:declared?100:0,req:1,done:declared?1:0,rows:0,empty:true,declared:!!declared};
+    return {pct:req?Math.round(done/req*100):100,req,done,rows:rows.length};
+  }
+  if(s.per==='applicant'){
+    count(s.fields,(c.data[s.id]||{}).a1);
+    if(hasApplicant2(c)) count(s.fields,(c.data[s.id]||{}).a2);
+  } else count(s.fields,c.data[s.id]);
+  return {pct:req?Math.round(done/req*100):(total?Math.round(filled/total*100):100),req,done,filled,total};
+}
+function overall(c){
+  let d=0,r=0;
+  SECTIONS.forEach(s=>{ const st=sectionStats(c,s); d+=st.done; r+=st.req; });
+  return r?Math.round(d/r*100):0;
+}
+function missingFor(c){
+  const out=[];
+  SECTIONS.forEach(s=>{
+    if(s.rows){
+      const st=sectionStats(c,s);
+      if(st.empty&&!st.declared) out.push({sec:s.id,name:s.name,field:'No entries yet'});
+      else (c.data[s.id]||[]).forEach((row,i)=>s.cols.filter(x=>x.req).forEach(fd=>{
+        if(!String(row[fd.id]||'').trim()) out.push({sec:s.id,name:s.name,field:'Row '+(i+1)+' · '+fd.label});
+      }));
+      return;
+    }
+    const who=s.per==='applicant'?(hasApplicant2(c)?['a1','a2']:['a1']):[null];
+    who.forEach(w=>{
+      const vals=w?(c.data[s.id]||{})[w]:c.data[s.id];
+      s.fields.filter(x=>x.req).forEach(fd=>{
+        if(!String((vals||{})[fd.id]||'').trim())
+          out.push({sec:s.id,name:s.name,field:fd.label+(w?' ('+(w==='a1'?'Applicant 1':'Applicant 2')+')':'')});
+      });
+    });
+  });
+  return out;
+}
+
+/* ------------------------------- totals --------------------------------- */
+/* Deliberately NOT converted between currencies — this tool records what is
+   held, in the currency it is held in. Anything else would be a guess at a
+   rate. Totals are shown per currency. */
+function assetTotals(c){
+  const byCcy={};
+  const add=(ccy,amt,neg)=>{ if(!amt)return; ccy=ccy||c.data.meta.ffCurrency||'GBP';
+    byCcy[ccy]=byCcy[ccy]||{assets:0,liabs:0};
+    if(neg) byCcy[ccy].liabs+=Number(amt)||0; else byCcy[ccy].assets+=Number(amt)||0; };
+  (c.data.properties||[]).forEach(p=>{ add(p.ccy,p.value); add(p.ccy,p.mortgage,1); });
+  (c.data.cash||[]).forEach(x=>add(x.ccy,x.amount));
+  (c.data.investments||[]).forEach(x=>add(x.ccy,x.value));
+  (c.data.dcPensions||[]).forEach(x=>add(x.ccy,x.value));
+  (c.data.dbPensions||[]).forEach(x=>add(x.ccy,x.cetv));
+  (c.data.liabilities||[]).forEach(x=>add(x.ccy,x.balance,1));
+  return byCcy;
+}
+function investableTotals(c){
+  const by={};
+  const add=(ccy,v)=>{ if(!v)return; ccy=ccy||c.data.meta.ffCurrency||'GBP'; by[ccy]=(by[ccy]||0)+(Number(v)||0); };
+  (c.data.cash||[]).forEach(x=>add(x.ccy,x.amount));
+  (c.data.investments||[]).forEach(x=>add(x.ccy,x.value));
+  (c.data.dcPensions||[]).forEach(x=>add(x.ccy,x.value));
+  return by;
+}
+function ccyList(map){
+  const k=Object.keys(map); if(!k.length) return '—';
+  return k.map(c=>money(typeof map[c]==='object'?map[c].assets-map[c].liabs:map[c],c)).join(' · ');
+}
+
+/* ===========================================================================
+   WORK REQUESTS — the jobs you currently raise on SharePoint. Each one becomes
+   an email to the admin team with a structured body, and a logged record here.
+   ========================================================================= */
+const WR_TYPES=[
+  {id:'appsout1',name:'Apps Out 1',team:'New Business',
+   desc:'Raise the application pack once the client has agreed to proceed and ID is complete.',
+   needs:['personal','kyc','risk','bank'],
+   fields:[ f('provider','Provider / platform','text',{req:1}),
+     f('product','Product','text',{req:1}),
+     f('amount','Amount','number',{req:1}), f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('source','Source of the funds','text',{req:1}),
+     f('urgency','Urgency','select',{list:['Standard','Urgent — deadline','Time critical']}),
+     f('notes','Instructions for admin','textarea',{full:1}) ]},
+  {id:'illustration',name:'Illustration request',team:'New Business',
+   desc:'Provider illustration or quotation ahead of a recommendation.',
+   needs:['personal','risk'],
+   fields:[ f('provider','Provider','text',{req:1}), f('product','Product','text',{req:1}),
+     f('amount','Amount','number',{req:1}), f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('charges','Charging basis','text'), f('notes','Details','textarea',{full:1}) ]},
+  {id:'loa',name:'Letter of authority',team:'Client Servicing',
+   desc:'Obtain policy information from an existing provider.',
+   needs:['personal'],
+   fields:[ f('provider','Provider','text',{req:1}), f('policyNo','Policy number','text'),
+     f('info','Information needed','textarea',{req:1,full:1}) ]},
+  {id:'withdrawal',name:'Withdrawal request',team:'Client Servicing',
+   desc:'One-off or regular withdrawal from an existing plan.',
+   needs:['personal','bank'],
+   fields:[ f('provider','Provider','text',{req:1}), f('policyNo','Policy number','text',{req:1}),
+     f('amount','Amount','number',{req:1}), f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('frequency','Frequency','select',{list:'frequency',req:1}),
+     f('reason','Reason for the withdrawal','textarea',{req:1,full:1}),
+     f('bank','Bank account to pay to','text',{req:1}),
+     f('sustain','Sustainability discussed with client','select',{list:'yn',req:1}) ]},
+  {id:'switch',name:'Fund switch / rebalance',team:'Investment',
+   desc:'Switch or rebalance within an existing plan.',
+   needs:['personal','risk'],
+   fields:[ f('provider','Provider','text',{req:1}), f('policyNo','Policy number','text',{req:1}),
+     f('from','Switch out of','textarea',{req:1,full:1}), f('to','Switch into','textarea',{req:1,full:1}),
+     f('reason','Rationale','textarea',{full:1}) ]},
+  {id:'topup',name:'Top-up / additional contribution',team:'New Business',
+   needs:['personal','kyc'],
+   fields:[ f('provider','Provider','text',{req:1}), f('policyNo','Policy number','text',{req:1}),
+     f('amount','Amount','number',{req:1}), f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('source','Source of funds','text',{req:1}), f('notes','Notes','textarea',{full:1}) ]},
+  {id:'transfer',name:'Pension transfer enquiry',team:'Pensions',
+   needs:['personal','dcPensions','risk'],
+   fields:[ f('scheme','Ceding scheme','text',{req:1}), f('policyNo','Policy / member number','text'),
+     f('type','Scheme type','select',{list:'pensionType',req:1}),
+     f('value','Approximate value','number'), f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('notes','Notes','textarea',{full:1}) ]},
+  {id:'valuation',name:'Valuation request',team:'Client Servicing',
+   needs:['personal'],
+   fields:[ f('provider','Provider(s)','text',{req:1}), f('asAt','Valuation date','date'),
+     f('purpose','Purpose','text'), f('notes','Notes','textarea',{full:1}) ]},
+  {id:'review',name:'Annual review pack',team:'Client Servicing',
+   needs:['personal'],
+   fields:[ f('reviewDate','Review meeting date','date',{req:1}),
+     f('include','What to include','textarea',{full:1}), f('notes','Notes','textarea',{full:1}) ]},
+  {id:'suitability',name:'Suitability report drafting',team:'Paraplanning',
+   needs:['personal','risk','journey'],
+   fields:[ f('recommendation','Recommendation summary','textarea',{req:1,full:1}),
+     f('provider','Provider','text'), f('amount','Amount','number'),
+     f('ccy','Currency','select',{list:'currency',def:'GBP'}),
+     f('deadline','Needed by','date'), f('notes','Notes','textarea',{full:1}) ]},
+  {id:'other',name:'Other request',team:'Client Servicing',
+   needs:['personal'],
+   fields:[ f('summary','What do you need?','textarea',{req:1,full:1}),
+     f('team','Which team','select',{list:['New Business','Client Servicing','Investment','Pensions','Paraplanning','Compliance']}),
+     f('deadline','Needed by','date') ]}
+];
+function wrType(id){ return WR_TYPES.find(w=>w.id===id); }
+
+/* ------------------------------ email build ----------------------------- */
+function wrBody(c,r){
+  const t=wrType(r.type), p=c.data.personal||{}, a=p.a1||{}, b=p.a2||{};
+  const L=[];
+  L.push(t.name.toUpperCase()+' — '+clientName(c));
+  L.push(''.padEnd(52,'='));
+  /* Aligns the value column, and drops long labels onto their own line rather
+     than letting the value collide with the colon. */
+  const PAD=26;
+  const kv=(label,value,indent)=>{
+    const ind=indent||'';
+    const head=ind+label+':';
+    const lines=String(value==null?'':value).split('\n');
+    if(head.length>=PAD){ L.push(head); lines.forEach(x=>L.push(ind+'    '+x)); return; }
+    L.push(head.padEnd(PAD)+lines[0]);
+    lines.slice(1).forEach(x=>L.push(' '.repeat(PAD)+x));
+  };
+  kv('Reference',c.ref);
+  kv('Request ID',r.ref);
+  kv('Team',r.fields.team||t.team);
+  kv('Raised by',c.data.meta.adviser||DB.settings.adviserName||'(adviser not set)');
+  kv('Raised on',fdate(r.created));
+  if(r.fields.deadline) kv('Needed by',fdate(r.fields.deadline));
+  L.push('');
+  L.push('CLIENT');
+  kv('Name',[a.title,a.firstName,a.surname].filter(Boolean).join(' '),'  ');
+  if(a.dob) kv('Date of birth',fdate(a.dob)+'  (age '+age(a.dob)+')','  ');
+  if(a.email) kv('Email',a.email,'  ');
+  if(a.mobile) kv('Mobile',a.mobile,'  ');
+  if(a.residence) kv('Residence',a.residence,'  ');
+  if(a.taxResidence) kv('Tax residence',a.taxResidence,'  ');
+  if(b.firstName||b.surname)
+    kv('Applicant 2',[b.title,b.firstName,b.surname].filter(Boolean).join(' ')
+      +(b.dob?' ('+fdate(b.dob)+')':''),'  ');
+  const risk=(c.data.risk||{}).a1||{};
+  if(risk.atrChosen) kv('Risk profile',risk.atrChosen+(risk.atrScore?' (score '+risk.atrScore+')':''),'  ');
+  L.push('');
+  L.push('REQUEST DETAILS');
+  t.fields.forEach(fd=>{
+    if(fd.id==='ccy'||fd.id==='team') return;
+    const v=r.fields[fd.id]; if(v===undefined||v===''||v===null) return;
+    let s=v;
+    if(fd.type==='number'&&/amount|value/i.test(fd.id)) s=money(v,r.fields.ccy||c.data.meta.ffCurrency);
+    else if(fd.type==='date') s=fdate(v);
+    kv(fd.label,s,'  ');
+  });
+  L.push('');
+  L.push('COMPLIANCE POSITION AT TIME OF REQUEST');
+  const kyc=(c.data.kyc||{}).a1||{};
+  kv('Proof of ID held',kyc.idHeld||'Not recorded','  ');
+  kv('Proof of address held',kyc.addressHeld||'Not recorded','  ');
+  kv('Source of wealth',kyc.sow||'Not recorded','  ');
+  kv('Source of funds',kyc.sof||'Not recorded','  ');
+  kv('PEP',kyc.pep||'Not recorded','  ');
+  kv('Vulnerability',((c.data.vulnerability||{}).a1||{}).identified||'Not recorded','  ');
+  kv('Fact Find completion',overall(c)+'%','  ');
+  const gaps=(t.needs||[]).map(id=>({s:sectionById(id),st:sectionStats(c,sectionById(id))}))
+    .filter(x=>x.st.pct<100);
+  if(gaps.length){
+    L.push('');
+    L.push('  NOTE — sections not yet complete for this request type:');
+    gaps.forEach(g=>L.push('    · '+g.s.name+' ('+g.st.pct+'%)'));
+  }
+  L.push('');
+  L.push(''.padEnd(52,'-'));
+  L.push('Raised from '+CFG.app+' · '+CFG.org);
+  return L.join('\n');
+}
+function wrSubject(c,r){
+  const t=wrType(r.type);
+  return '['+c.ref+'] '+t.name+' — '+clientName(c);
+}
+function mailto(to,subject,body,cc){
+  let u='mailto:'+encodeURIComponent(to||'')+'?subject='+encodeURIComponent(subject||'')
+    +'&body='+encodeURIComponent(body||'');
+  if(cc) u+='&cc='+encodeURIComponent(cc);
+  return u;
+}
+function openMail(to,subject,body,cc){
+  /* The published artifact page is sandboxed: it is not allowed to open your
+     email program, and trying shows the browser's "content blocked" screen.
+     There, hand the email over ready to paste instead of hitting the wall.
+     From the desktop copy, this opens a draft in Outlook directly. */
+  if(window.claude){ emailHandoff(to,subject,body,cc); return; }
+  const url=mailto(to,subject,body,cc);
+  /* Windows shortens very long mailto targets; warn rather than silently
+     truncate the request. */
+  if(url.length>1900){
+    toast('Long email','Your mail client may truncate this. Use “Copy” and paste it in if anything is missing.','warn',7000);
+  }
+  window.location.href=url;
+}
+async function copyText(t,what){
+  try{ await navigator.clipboard.writeText(t); toast('Copied',(what||'Text')+' is on your clipboard.'); }
+  catch(e){
+    const ta=document.createElement('textarea'); ta.value=t;
+    ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); toast('Copied',(what||'Text')+' is on your clipboard.'); }
+    catch(_){ toast('Could not copy','Select the text and copy it manually.','warn'); }
+    ta.remove();
+  }
+}
+
+/* ===========================================================================
+   OUTBOUND LINKS — the Fact Find and risk profile links you send to clients.
+   The link carries a token so the returned form can be matched to the record.
+   ========================================================================= */
+const SEND_KINDS={
+  factfind:{ name:'Fact Find', path:'factfind', attach:true,
+    subject:c=>'Your Fact Find — '+CFG.org,
+    intro:'Before we meet, please complete your Fact Find. Your personal form is attached to this email — save it, open it in your web browser (just double-click it), and work through the questions. It takes around 20 minutes, saves as you go, and the last step sends your answers straight back to me.' },
+  risk:{ name:'Risk profile questionnaire', path:'risk',
+    subject:c=>'Your risk profile questionnaire — '+CFG.org,
+    intro:'Please complete the short attitude-to-risk questionnaire below. It takes about 10 minutes and helps us understand how you feel about investment risk.' },
+  idcheck:{ name:'ID verification', path:'id',
+    subject:c=>'Identity verification — '+CFG.org,
+    intro:'Please complete your identity verification using the secure link below. You will need your passport and a recent proof of address.' },
+  esg:{ name:'Sustainability preferences', path:'esg',
+    subject:c=>'Sustainability preferences — '+CFG.org,
+    intro:'Please complete this short questionnaire about your sustainability preferences.' },
+  upload:{ name:'Document upload', path:'upload',
+    subject:c=>'Document upload — '+CFG.org,
+    intro:'Please use the secure link below to upload the documents we discussed.' }
+};
+function sendLink(c,kind){
+  const k=SEND_KINDS[kind];
+  const base=(DB.settings.portalBase||CFG.portalBase).replace(/\/?$/,'/');
+  return base+k.path+'/'+encodeURIComponent(c.ref)+'?t='+c.id.slice(-8);
+}
+function sendBody(c,kind){
+  const k=SEND_KINDS[kind];
+  const a=(c.data.personal||{}).a1||{};
+  const who=a.firstName||clientName(c).split(' ')[0]||'there';
+  const adviser=c.data.meta.adviser||DB.settings.adviserName||'';
+  const L=[];
+  L.push('Dear '+who+',');
+  L.push('');
+  L.push(k.intro);
+  L.push('');
+  if(!k.attach){
+    L.push(sendLink(c,kind));
+    L.push('');
+    L.push('Your reference is '+c.ref+'. Please do not share this link.');
+  } else {
+    L.push('Your reference is '+c.ref+'.');
+  }
+  L.push('');
+  L.push('If anything is unclear, reply to this email and I will talk it through with you.');
+  L.push('');
+  L.push('Kind regards');
+  L.push(adviser||'');
+  L.push(CFG.org);
+  if(DB.settings.adviserPhone) L.push(DB.settings.adviserPhone);
+  return L.join('\n');
+}
+function logSend(c,kind,how){
+  DB.sends.unshift({ id:uid('sn'), clientId:c.id, kind, how, at:new Date().toISOString(),
+    to:primaryEmail(c), link:sendLink(c,kind) });
+  save();
+}
+
+/* ===========================================================================
+   CSV EXPORT
+   Three shapes, because they answer different questions:
+     · Clients      — one row per client, headline figures. For a quick list.
+     · Full record  — one row per field. Nothing is lost, nothing is truncated.
+     · Repeating    — one file per table (properties, pensions, ...).
+   ========================================================================= */
+function csvCell(v){
+  if(v==null) return '';
+  const s=String(v);
+  return /[",\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+function toCSV(rows){
+  return '﻿'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n');
+}
+function csvClients(){
+  const head=['Reference','Client','Status','Applicant 1','Applicant 2','DOB 1','Age 1','Email','Mobile',
+    'Residence','Tax residence','Reporting currency','Adviser','Fact Find date','Risk category','ATR score',
+    'Completion %','Investable (by currency)','Net worth (by currency)','Dependants','Properties','Pensions',
+    'Created','Last updated'];
+  const rows=[head];
+  DB.clients.forEach(c=>{
+    const p=c.data.personal||{}, a=p.a1||{}, b=p.a2||{}, m=c.data.meta||{}, r=(c.data.risk||{}).a1||{};
+    rows.push([ c.ref, clientName(c), c.status,
+      [a.title,a.firstName,a.surname].filter(Boolean).join(' '),
+      [b.title,b.firstName,b.surname].filter(Boolean).join(' '),
+      a.dob||'', a.dob?age(a.dob):'', a.email||'', a.mobile||'',
+      a.residence||'', a.taxResidence||'', m.ffCurrency||'', m.adviser||'', m.ffDate||'',
+      r.atrChosen||'', r.atrScore||'', overall(c),
+      ccyList(investableTotals(c)), ccyList(assetTotals(c)),
+      (c.data.dependants||[]).length, (c.data.properties||[]).length,
+      (c.data.dcPensions||[]).length+(c.data.dbPensions||[]).length,
+      c.created?iso(c.created):'', c.updated?iso(c.updated):'' ]);
+  });
+  return toCSV(rows);
+}
+/* One row per field: the export you can actually rebuild a record from, and
+   the one to hand to anyone who asks "what have we got on file?" */
+function csvFull(clients){
+  const rows=[['Reference','Client','Section','Applicant','Row','Field','Value']];
+  clients.forEach(c=>{
+    const nm=clientName(c);
+    SECTIONS.forEach(s=>{
+      if(s.rows){
+        (c.data[s.id]||[]).forEach((row,i)=>s.cols.forEach(fd=>{
+          const v=row[fd.id]; if(v===undefined||v===''||v===null) return;
+          rows.push([c.ref,nm,s.name,'',i+1,fd.label,v]);
+        }));
+        return;
+      }
+      const who=s.per==='applicant'
+        ? [['Applicant 1','a1'],['Applicant 2','a2']].filter(w=>w[1]==='a1'||hasApplicant2(c))
+        : [['','']];
+      who.forEach(w=>{
+        const vals=w[1]?(c.data[s.id]||{})[w[1]]:c.data[s.id];
+        s.fields.forEach(fd=>{
+          const v=(vals||{})[fd.id]; if(v===undefined||v===''||v===null) return;
+          rows.push([c.ref,nm,s.name,w[0],'',fd.label,v]);
+        });
+      });
+    });
+  });
+  return toCSV(rows);
+}
+function csvTable(sectionId){
+  const s=sectionById(sectionId);
+  const rows=[['Reference','Client'].concat(s.cols.map(x=>x.label))];
+  DB.clients.forEach(c=>(c.data[sectionId]||[]).forEach(r=>{
+    rows.push([c.ref,clientName(c)].concat(s.cols.map(x=>r[x.id]==null?'':r[x.id])));
+  }));
+  return toCSV(rows);
+}
+function csvRequests(){
+  const rows=[['Request ID','Raised','Client ref','Client','Type','Team','Status','Sent','Details']];
+  DB.requests.forEach(r=>{
+    const c=getClient(r.clientId), t=wrType(r.type);
+    const det=t.fields.map(fd=>r.fields[fd.id]?fd.label+': '+r.fields[fd.id]:null).filter(Boolean).join(' | ');
+    rows.push([r.ref,iso(r.created),c?c.ref:'',c?clientName(c):'(deleted)',t?t.name:r.type,
+      r.fields.team||(t?t.team:''),r.status,r.sentAt?iso(r.sentAt):'',det]);
+  });
+  return toCSV(rows);
+}
+
+/* ---------------------------- file delivery ----------------------------- */
+/* `csv` sits in the artifact runtime's extended extension set, which is not
+   enabled everywhere. Fall back to .txt (Excel opens it identically) and then
+   to a plain blob download, so the button always does something. */
+let DL=null, DL_TRIED=false;
+async function downloads(){
+  if(DL_TRIED) return DL;
+  DL_TRIED=true;
+  try{ DL=(window.claude&&claude.use)?await claude.use('downloads'):null; }catch(e){ DL=null; }
+  return DL;
+}
+async function saveFile(name,text){
+  const dl=await downloads();
+  if(dl){
+    try{ await dl.save({filename:name,data:text}); toast('Downloaded',name); return true; }
+    catch(e){
+      const code=e&&e.code;
+      if(code==='declined'){ toast('Download cancelled','No file was saved.','warn'); return false; }
+      if(code==='extension_not_enabled'||code==='rejected_extension'){
+        const alt=name.replace(/\.csv$/i,'.txt');
+        try{ await dl.save({filename:alt,data:text});
+          toast('Downloaded',alt+' — open it in Excel and it will read as a CSV.'); return true; }
+        catch(e2){ if(e2&&e2.code==='declined'){ toast('Download cancelled','No file was saved.','warn'); return false; } }
+      }
+      if(code==='rate_limited'){ toast('One at a time','A download prompt is already open.','warn'); return false; }
+    }
+  }
+  return blobDownload(name,text);
+}
+function blobDownload(name,text){
+  /* Inside the published page a script-started download is silently inert —
+     say so rather than letting the button appear to do nothing. */
+  if(window.claude){
+    toast('Download blocked here','The published page cannot hand over this file — use “Copy” and paste it, or open the desktop copy where downloads work.','warn',8000);
+    return false;
+  }
+  try{
+    const b=new Blob([text],{type:'text/csv;charset=utf-8'});
+    const u=URL.createObjectURL(b), a=document.createElement('a');
+    a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u),1500);
+    toast('Downloaded',name);
+    return true;
+  }catch(e){
+    toast('Download blocked','Use “Copy to clipboard” and paste into a spreadsheet instead.','warn',8000);
+    return false;
+  }
+}
+function stamp(){ const d=new Date(); return d.getFullYear()+d2(d.getMonth()+1)+d2(d.getDate()); }
+
+/* -------------------------- backup / restore ---------------------------- */
+function backupJSON(){ return JSON.stringify({app:CFG.app,version:CFG.version,exported:new Date().toISOString(),
+  clients:DB.clients,requests:DB.requests,sends:DB.sends,settings:DB.settings},null,1); }
+function restoreJSON(txt,mode){
+  const o=JSON.parse(txt);
+  if(!o||!Array.isArray(o.clients)) throw new Error('This does not look like a Fact Find backup.');
+  if(mode==='replace'){ DB.clients=o.clients; DB.requests=o.requests||[]; DB.sends=o.sends||[]; }
+  else {
+    const have=new Set(DB.clients.map(c=>c.id));
+    o.clients.forEach(c=>{ if(!have.has(c.id)) DB.clients.push(c); });
+    const hr=new Set(DB.requests.map(r=>r.id));
+    (o.requests||[]).forEach(r=>{ if(!hr.has(r.id)) DB.requests.push(r); });
+  }
+  if(o.settings) DB.settings=Object.assign({},DB.settings,o.settings);
+  save(true);
+  return o.clients.length;
+}
+
+/* -------------------------------- toasts -------------------------------- */
+function toast(title,sub,kind,ms){
+  const w=$('#toasts'); if(!w) return;
+  const el=document.createElement('div');
+  el.className='toast'+(kind?' '+kind:'');
+  el.innerHTML='<span class="ic">'+ic(kind==='risk'?'alert':kind==='warn'?'alert':'checkc',16)+'</span>'
+    +'<div><div class="tt">'+esc(title)+'</div>'+(sub?'<div class="ts">'+esc(sub)+'</div>':'')+'</div>';
+  w.appendChild(el);
+  setTimeout(()=>{ el.classList.add('out'); setTimeout(()=>el.remove(),200); },ms||3400);
+}

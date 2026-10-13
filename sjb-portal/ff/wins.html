@@ -1,0 +1,48 @@
+/* ===========================================================================
+   INSIGHTS — what the bounce-backs are teaching us.
+
+   Every case the portal handles feeds this screen: how many letters, how
+   many came back, which checklist rules they came back on, by adviser and by
+   template, and the rules the checklist does not have yet. This is the
+   evidence that the firm monitors its own quality, and the list Jake reads.
+   ========================================================================= */
+const INS={data:null,busy:false,info:null};
+async function insLoad(){ INS.busy=true; try{ INS.data=await rwlApi('GET','/api/rwl/insights'); INS.info=null; }catch(e){ INS.info=e.message; } INS.busy=false; }
+const insTile=(v,label,sub,cls)=>'<div class="card"><div class="card-b" style="padding:14px 16px"><div style="font-size:26px;font-weight:800;line-height:1.1;color:var(--'+(cls||'ink')+')">'+esc(v==null?'—':v)+'</div><div class="small b7" style="margin-top:4px">'+esc(label)+'</div>'+(sub?'<div class="hint">'+esc(sub)+'</div>':'')+'</div></div>';
+const insBar=(n,max)=>'<div class="pb t" style="width:120px;display:inline-block;vertical-align:middle;margin-right:8px"><i style="width:'+(max?Math.round(100*n/max):0)+'%;background:var(--orange)"></i></div>';
+function screenIns(){
+  const d=INS.data;
+  let h='<div class="ph"><div><h1>Insights</h1><div class="sub">What the checks and the bounce-backs are showing, across every letter in the portal.</div></div>'
+    +'<div class="sp"><button class="btn" data-a="insHome">'+ic('swap',15)+' Refresh</button></div></div>';
+  if(INS.info) h+='<div class="note risk mb"><span class="ic">'+ic('alert',15)+'</span><div>'+esc(INS.info)+'</div></div>';
+  if(!d) return h+(INS.busy?'<div class="row" style="gap:8px"><span class="spin"></span><span class="small muted">Loading…</span></div>':'');
+  const bounce=d.bounceRate==null?'—':d.bounceRate+'%';
+  h+='<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">'
+    +insTile(d.cases,'Letters in the portal',null)
+    +insTile(d.avgScore==null?null:d.avgScore+'/100','Average check score','before any fixes',d.avgScore==null?'ink':d.avgScore>=80?'ok':d.avgScore>=50?'warn':'risk')
+    +insTile(bounce,'Bounce-back rate',d.submitted+' sent, '+d.returned+' returned',d.bounceRate==null?'ink':d.bounceRate<=20?'ok':d.bounceRate<=50?'warn':'risk')
+    +insTile(d.avgHoursToFix==null?null:d.avgHoursToFix+' h','Time to redline','from email to Word file')
+    +'</div>';
+  /* objections */
+  const mx=Math.max(1,...d.topObjections.map(o=>o.count));
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><div><h3>What Blacktower sends back</h3><div class="sub">Points in compliance emails, matched to the checklist rule they relate to.</div></div></div><div class="card-b flush"><div class="tw"><table class="t"><thead><tr><th style="width:90px">Rule</th><th style="width:200px">Section</th><th style="width:220px">Times</th><th>Examples</th></tr></thead><tbody>'
+    +(d.topObjections.map(o=>'<tr><td class="mono b7">'+esc(o.rule)+'</td><td class="small">'+esc(o.section)+'</td><td>'+insBar(o.count,mx)+'<span class="b7">'+o.count+'</span></td><td class="small" style="white-space:normal">'+o.examples.map(esc).join(' · ')+'</td></tr>').join('')||'<tr><td colspan="4" class="small muted">No bounce-backs recorded yet.</td></tr>')
+    +'</tbody></table></div></div></div>';
+  /* findings */
+  const mf=Math.max(1,...d.topFindings.map(o=>o.count));
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><div><h3>What the pre-check catches</h3><div class="sub">'+d.totalFindings+' finding(s) across the letters checked. C-rules are the automatic checks.</div></div></div><div class="card-b flush"><div class="tw"><table class="t"><thead><tr><th style="width:90px">Rule</th><th>Section</th><th style="width:220px">Times</th></tr></thead><tbody>'
+    +(d.topFindings.map(o=>'<tr><td class="mono b7">'+esc(o.rule)+'</td><td class="small">'+esc(o.section)+'</td><td>'+insBar(o.count,mf)+'<span class="b7">'+o.count+'</span></td></tr>').join('')||'<tr><td colspan="3" class="small muted">No checks run yet.</td></tr>')
+    +'</tbody></table></div></div></div>';
+  /* by adviser and template */
+  const tbl=(title,sub,rows,key)=>'<div class="card"><div class="card-h"><div><h3>'+title+'</h3><div class="sub">'+sub+'</div></div></div><div class="card-b flush"><div class="tw"><table class="t"><thead><tr><th>'+key+'</th><th class="r">Letters</th><th class="r">Returned</th><th class="r">Avg score</th></tr></thead><tbody>'
+    +(rows.map(r=>'<tr><td class="b7">'+esc(r.adviser||r.template)+'</td><td class="r">'+r.cases+'</td><td class="r">'+r.returned+'</td><td class="r">'+(r.avgScore==null?'—':r.avgScore)+'</td></tr>').join('')||'<tr><td colspan="4" class="small muted">Nothing yet.</td></tr>')+'</tbody></table></div></div></div>';
+  h+='<div class="grid" style="grid-template-columns:1fr 1fr;margin-top:16px">'+tbl('By adviser','Where the coaching goes.',d.byAdviser,'Adviser')+tbl('By template','Which templates still need aligning.',d.byTemplate,'Template')+'</div>';
+  /* new rules */
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><div><h3>Rules the checklist does not have yet</h3><div class="sub">Points Blacktower raised that matched no rule. Add the good ones in Sales Manual › Checklist'+(d.manual?' (current manual: '+esc(d.manual)+')':'')+'.</div></div></div><div class="card-b">'
+    +(d.newRules.length?'<ul style="margin:0;padding-left:18px">'+d.newRules.map(n=>'<li class="small" style="margin-bottom:6px">'+esc(n.rule)+' <span class="muted2">· '+esc(n.ref)+'</span></li>').join('')+'</ul>':'<p class="small muted">None so far. Every point so far matched a rule already on the checklist.</p>')
+    +'</div></div>';
+  return h;
+}
+adminTool({id:'ins',name:'Insights',icon:'sliders',action:'insHome',screen:screenIns,
+  desc:'Scores, bounce-back rate, the objections that keep coming back by adviser and by template, and the rules the checklist is missing.'});
+Object.assign(ACT,{ async insHome(){ S.screen='ins'; render(); await insLoad(); render(); window.scrollTo(0,0); } });

@@ -1,0 +1,300 @@
+<!doctype html><meta charset="utf-8"><title>meeting transcript test</title>
+<script>
+/* Filling the Fact Find from a meeting transcript.
+   The meeting, the people and every figure below are invented. */
+window.__TX_LINES=[
+ 'SJB Global - Planning call with Dana Hale and Peter Marlow-Meeting Transcript',
+ '14 September 2026, 09:00am',
+ 'Dana Hale started transcription',
+ 'Dana Hale 0:06Peter, good morning. How are you keeping?',
+ 'Peter Marlow 0:09Morning Dana. Not bad, a bit of a cold.',
+ 'Dana Hale 0:14Sorry to hear that. I am up at my villa in Costa Blanca this week, worth about 900,000 now, so at least it is warm.',
+ 'Peter Marlow 0:22Lovely. We met at 10:30 last time, did we not, so this is earlier.',
+ 'Dana Hale 0:30It is. Let me take some details. You are married, is that right?',
+ 'Peter Marlow 0:35Yes, married to Helen, thirty one years now.',
+ 'Dana Hale 0:41And where are you living at the moment?',
+ 'Peter Marlow 0:44We live in Portugal, near Tavira. We left the UK in 2019.',
+ 'Dana Hale 0:52What do you do for work?',
+ 'Peter Marlow 0:55I am a marine engineer, self-employed these days. I bring in about 72,000 a year.',
+ 'Dana Hale 1:04Pounds or euros?',
+ 'Peter Marlow 1:06Euros.',
+ 'Dana Hale 1:10Pensions. What have you got?',
+ 'Peter Marlow 1:13There is one with Harbourline, a personal pension, the last statement said 184,500.',
+ 'and I think there is an old workplace one with Tidewater as well.',
+ 'Dana Hale 1:26Do you know the value of the Tidewater one?',
+ 'Peter Marlow 1:29About 41,000 I think.',
+ 'Dana Hale 1:33And property?',
+ 'Peter Marlow 1:36We own the house in Tavira, worth roughly 450,000 euros, no mortgage.',
+ 'Dana Hale 1:45When would you like to stop working?',
+ 'Peter Marlow 1:48I would like to retire at 63 and we would need about 38,000 a year to live on.',
+ 'Dana Hale 1:58Do you have a will?',
+ 'Peter Marlow 2:01Yes, we both did one in the UK but it is years old.',
+ 'Dana Hale 2:08What matters most to you in all this?',
+ 'Peter Marlow 2:11Honestly, I just want to know we will not run out and that Helen is looked after if I go first.',
+ 'Dana Hale 2:20Understood. Going back to the Harbourline pension, was that 184,500?',
+ 'Peter Marlow 2:25Actually I checked, it is 191,200 now.',
+ 'Dana Hale 2:31Thanks Peter. I will write this up.',
+ 'Dana Hale stopped transcription'
+];
+window.__runTx=async function(){
+  const L0=[]; const say=s=>L0.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const NL=String.fromCharCode(10);
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  try{
+    const lines=window.__TX_LINES;
+
+    /* ---------------- reading the file into turns ---------------- */
+    say('--- turns and speakers ---');
+    const tx=txParse(lines);
+    say('    '+tx.turns.length+' turns, speakers: '+Object.keys(tx.speakers).join(', '));
+    ok(Object.keys(tx.speakers).length===2,'  two speakers found');
+    ok(tx.speakers['Dana Hale']>5&&tx.speakers['Peter Marlow']>5,'  both with their turns counted');
+    ok(tx.turns.length===27,'  twenty-seven turns (title, date and start/stop lines are not turns)');
+    ok(tx.turns[0].speaker==='Dana Hale'&&tx.turns[0].t==='0:06','  the first turn has its speaker and time');
+    ok(tx.turns[0].text==='Peter, good morning. How are you keeping?','  and the time is not left in the words');
+    const harb=tx.turns.find(x=>/Harbourline, a personal/.test(x.text));
+    ok(/Tidewater as well/.test(harb.text),'  a line with no speaker joins the turn before it');
+    ok(!tx.speakers['We met at'],'  "We met at 10:30" is not mistaken for a person');
+    ok(tx.turns.every(x=>!/transcription$/.test(x.text)),'  the start and stop lines are dropped');
+
+    say('--- other formats ---');
+    const script=txParse(['Dana Hale: Good morning.','Peter Marlow: Morning.','Dana Hale: Where do you live?','Peter Marlow: Portugal.']);
+    ok(script.turns.length===4&&script.turns[3].text==='Portugal.','  a "Name: text" script is read');
+    const vtt=txParse(['WEBVTT','','1','00:00:06.000 --> 00:00:09.000','<v Dana Hale>Good morning.</v>','','2',
+      '00:00:09.500 --> 00:00:12.000','<v Peter Marlow>Morning Dana.</v>','','3','00:00:13.000 --> 00:00:15.000',
+      '<v Dana Hale>Where do you live?</v>','','4','00:00:16.000 --> 00:00:18.000','<v Peter Marlow>Portugal.</v>']);
+    ok(vtt.turns.length===4&&vtt.turns[1].speaker==='Peter Marlow','  a .vtt caption file is read');
+    const plain=txParse(['We talked about pensions for a while.','Then about the house.']);
+    ok(plain.turns.length===1&&plain.turns[0].speaker==='','  text with no speakers is still read, as one turn');
+
+    /* ---------------- who is the adviser ---------------- */
+    say('--- the adviser ---');
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-09-14',ffCurrency:'EUR',adviser:'Dana Hale'};
+    DB.clients.unshift(c);
+    ok(txAdviser(tx,c)==='Dana Hale','  found from the name on the Fact Find');
+    const c0=blankClient(); c0.data.meta={};
+    ok(txAdviser(tx,c0)==='Dana Hale','  or, with no name to go on, whoever asks the questions');
+
+    /* ---------------- parts ---------------- */
+    say('--- parts ---');
+    const small=txChunks(tx.turns,700);
+    say('    '+small.length+' parts at 700 characters');
+    ok(small.length>=3,'  a long meeting is split');
+    ok(small.every(p=>p.text.length<=700),'  every part fits');
+    ok(small[0].from===0&&small[small.length-1].to===tx.turns.length-1,'  from the first turn to the last');
+    ok(small.every((p,i)=>i===0||p.from<=small[i-1].to),'  each part overlaps the one before, so nothing falls between');
+    ok(txChunks(tx.turns,11000).length===1,'  and a short one is read whole');
+
+    /* ---------------- the checks ---------------- */
+    say('--- was it actually said ---');
+    ok(!!txFindQuote(tx,'I am a marine engineer, self-employed these days'),'  an exact quote is found');
+    ok(!!txFindQuote(tx,'i am a marine engineer   SELF EMPLOYED these days!'),'  whatever the punctuation and case');
+    const loose=txFindQuote(tx,'well I would like to retire at 63 and we would need about 38,000 a year');
+    ok(!!loose&&!loose.exact,'  a near quote is found and marked approximate');
+    ok(!txFindQuote(tx,'I have a pension with Northgate worth 500,000'),'  something never said is not found');
+    ok(txFindQuote(tx,'it is 191,200 now').turn.speaker==='Peter Marlow','  and we know who said it');
+    const two=txFindQuote(tx,'the last statement said 184,500. ... Actually I checked, it is 191,200 now.');
+    ok(!!two&&two.exact&&two.turn.t==='2:25','  two quotes joined by "…" are each checked, and dated to the later one');
+    ok(!txFindQuote(tx,'the last statement said 184,500 ... and then it doubled to 400,000'),'  and fail if either half was never said');
+    ok(!!txFindQuote(tx,'Euros.'),'  a one-word answer counts when it is the whole of what was said');
+    ok(!txFindQuote(tx,'Peter'),'  but a stray word proves nothing');
+    ok(!txFindQuote(tx,'Yes'),'  nor does a bare yes');
+    ok(txCcySaid('worth roughly 450,000 euros',  'EUR')&&txCcySaid('about £40,000','GBP')&&!txCcySaid('the last statement said 184,500','EUR'),
+       '  a currency counts only if it was spoken');
+
+    say('--- figures ---');
+    [['£350,000',350000],['350k',350000],['1.2m',1200000],['350 thousand',350000],['72000',72000],[38000,38000],['about 41,000',41000]]
+      .forEach(([a,b])=>ok(txNumber(a)===b,'  '+JSON.stringify(a)+' reads as '+b));
+    ok(txNumber('none')===null,'  and words that are not a number do not');
+    ok(txNumIn('the last statement said 184,500',184500),'  a figure is found in its own quote');
+    ok(!txNumIn('the last statement said 184,500',400000),'  and a different figure is not');
+
+    say('--- choices ---');
+    ok(txPick(L.marital,'married')==='Married','  "married" is Married');
+    ok(txPick(L.country,'UK')==='United Kingdom','  "UK" is United Kingdom');
+    ok(txPick(L.country,'Portugal')==='Portugal','  a country by name');
+    ok(txPick(L.employment,'self employed')==='Self-employed','  "self employed" is Self-employed');
+    ok(txPick(L.yn,'yes')==='Yes','  "yes" is Yes');
+    ok(txPick(CURRENCIES,'euros')==='EUR','  "euros" is EUR');
+    ok(txPick(L.marital,'it is complicated')==='','  and something that is not an option is not forced into one');
+    ok(txDate('1964-03-09')==='1964-03-09'&&txDate('09/03/1964')==='1964-03-09'&&txDate('March 1964')==='','  dates need the full date');
+
+    say('--- what came back ---');
+    ok(txJson('[{"k":"a","v":1,"q":"x"}]').length===1,'  plain JSON');
+    ok(txJson('```json\n[{"k":"a","v":1,"q":"x"}]\n```').length===1,'  JSON in a code fence');
+    ok(txJson('Here you go: [{"k":"a","v":1,"q":"x"},{"k":"b","v":2,"q":"y"}] hope that helps').length===2,'  JSON with chatter round it');
+    ok(txJson('[{"k":"a","v":1,"q":"x"},{"k":"b","v":2,"q":"y"').length===1,'  a cut-off reply keeps the items that were whole');
+    ok(txJson('sorry, nothing').length===0,'  and no JSON is no items');
+
+    /* ---------------- the whole read, with the assistant stood in for ---------------- */
+    say('--- a full read ---');
+    const canned=[
+      {k:'personal.marital',who:'1',v:'married',q:'Yes, married to Helen, thirty one years now.'},
+      {k:'personal.residence',who:'1',v:'Portugal',q:'We live in Portugal, near Tavira.'},
+      {k:'employment.occupation',who:'1',v:'Marine engineer',q:'I am a marine engineer, self-employed these days.'},
+      {k:'employment.status',who:'1',v:'self employed',q:'I am a marine engineer, self-employed these days.'},
+      {k:'employment.salary',who:'1',v:72000,q:'I bring in about 72,000 a year.'},
+      /* a one-word answer, quoted whole */
+      {k:'employment.salaryCcy',who:'1',v:'EUR',q:'Euros.'},
+      /* worked out from his name, not said: must go */
+      {k:'personal.title',who:'1',v:'Mr',q:'Peter'},
+      {k:'retirement.retireAge',who:'1',v:63,q:'I would like to retire at 63'},
+      {k:'retirement.desiredIncome',who:'1',v:38000,q:'we would need about 38,000 a year to live on'},
+      {k:'estate.will',who:'1',v:'Yes',q:'Yes, we both did one in the UK but it is years old.'},
+      {k:'estate.willCountry',who:'1',v:'UK',q:'we both did one in the UK'},
+      {k:'journey.priorities',who:'1',v:'I just want to know we will not run out and that Helen is looked after if I go first.',
+        q:'I just want to know we will not run out and that Helen is looked after if I go first.'},
+      /* invented: never said */
+      {k:'personal.nationality',who:'1',v:'British',q:'I hold a British passport and always have'},
+      {k:'dcPensions',who:'1',v:{name:'Northgate',value:500000,ccy:'GBP'},q:'I have a pension with Northgate worth 500,000'},
+      /* the adviser talking about her own villa */
+      {k:'properties',who:'1',v:{location:'Costa Blanca',type:'Holiday property',value:900000},
+        q:'I am up at my villa in Costa Blanca this week, worth about 900,000 now'},
+      /* a figure that is not the one in the quote */
+      {k:'estate.inheritanceAmount',who:'1',v:250000,q:'Yes, we both did one in the UK but it is years old.'},
+      /* an option that does not exist */
+      {k:'personal.health',who:'1',v:'a bit of a cold',q:'Not bad, a bit of a cold.'},
+      /* real things there can be several of */
+      {k:'dcPensions',who:'1',v:{name:'Harbourline',type:'personal pension',value:184500,ccy:'EUR'},q:'There is one with Harbourline, a personal pension, the last statement said 184,500.'},
+      {k:'dcPensions',who:'1',v:{name:'Tidewater',value:41000},q:'About 41,000 I think.'},
+      {k:'properties',who:'joint',v:{location:'Tavira',type:'Main residence',value:450000,ccy:'EUR',mortgage:0},
+        q:'We own the house in Tavira, worth roughly 450,000 euros, no mortgage.'},
+      /* a key that does not exist */
+      {k:'personal.shoeSize',who:'1',v:9,q:'Morning Dana. Not bad, a bit of a cold.'},
+      /* mentioned again, corrected */
+      {k:'dcPensions',who:'1',v:{name:'Harbourline pension',policyNo:'HB-220931'},q:'Actually I checked, it is 191,200 now.'}
+    ];
+    const _api=api; let calls=0, sent=null;
+    api=async function(m,p,b){ if(p==='/api/ai'){ calls++; sent=b; return {text:JSON.stringify(canned)}; } return _api(m,p,b); };
+    /* the Fact Find already holds an occupation the adviser typed */
+    c.data.employment={a1:{occupation:'Engineer'},a2:{}};
+    let res;
+    try{ res=await txRun(c,lines,{}); } finally { api=_api; }
+    ok(calls===1,'  one call for a short meeting');
+    ok(sent.kind==='transcriptExtract'&&sent.adviser==='Dana Hale','  naming the adviser to the assistant');
+    ok(/Client 1 .* is Peter Marlow/.test(sent.people),'  and the client, from the speaker name');
+    ok(sent.want.length>40&&sent.lists.length===9,'  asking for '+sent.want.length+' answers and '+sent.lists.length+' lists');
+    ok(sent.facts.indexOf('Dana Hale [0:06]: Peter, good morning.')===0,'  the transcript goes as speaker, time and words');
+    say('    returned '+res.stats.returned+', thrown away '+res.stats.noEvidence+', unknown '+res.stats.unknown
+        +'  → '+res.facts.length+' answers, '+res.items.length+' items');
+    const F=(sec,id)=>res.facts.find(x=>x.sec===sec&&x.id===id);
+    const I=(list,name)=>res.items.find(x=>x.list===list&&String(x.fields[x.key]).indexOf(name)===0);
+    ok(res.stats.noEvidence===3,'  the two invented answers and the worked-out title are thrown away');
+    ok(!F('personal','title'),'  no title worked out from a first name');
+    ok(F('employment','salaryCcy')&&F('employment','salaryCcy').value==='EUR','  the salary is in euros, because he said so');
+    ok(F('personal','residence').who==='a1'&&res.facts.filter(x=>x.id==='residence').length===1,
+       '  with one applicant, a shared answer fills that applicant only');
+    ok(!F('personal','nationality'),'  no nationality that was never stated');
+    ok(!I('dcPensions','Northgate'),'  no pension that was never mentioned');
+    ok(res.stats.unknown===1&&!F('personal','shoeSize'),'  a question that is not on the Fact Find is ignored');
+
+    ok(F('personal','marital').value==='Married'&&F('personal','marital').use,'  married, ticked');
+    ok(F('personal','residence').value==='Portugal','  living in Portugal');
+    ok(F('employment','status').value==='Self-employed','  self-employed, matched to the list');
+    ok(F('employment','salary').value===72000&&F('employment','salary').use,'  72,000 a year, ticked');
+    ok(F('retirement','retireAge').value===63,'  retiring at 63');
+    ok(F('retirement','desiredIncome').value===38000,'  wanting 38,000 a year');
+    ok(F('estate','willCountry').value==='United Kingdom','  will made in the United Kingdom');
+    ok(/Helen is looked after/.test(F('journey','priorities').value),'  priorities in his own words');
+    ok(F('personal','marital').speaker==='Peter Marlow'&&F('personal','marital').t==='0:35','  each with who said it and when');
+
+    const occ=F('employment','occupation');
+    ok(occ.replaces&&occ.current==='Engineer'&&!occ.use,'  an answer that would replace the adviser’s own is NOT ticked');
+    const inh=F('estate','inheritanceAmount');
+    ok(inh&&inh.check&&!inh.use,'  a figure that is not in its own quote is flagged and not ticked');
+    const hl=F('personal','health');
+    ok(hl&&hl.unlisted&&!hl.use&&hl.value==='','  an answer that fits no option is offered for the adviser to choose');
+
+    const villa=I('properties','Costa Blanca');
+    ok(!!villa&&villa.byAdviser&&!villa.use,'  the adviser’s own villa is flagged as said by the adviser and NOT ticked');
+    const house=I('properties','Tavira');
+    ok(!!house&&house.use&&house.who==='joint'&&house.fields.value===450000&&house.fields.ccy==='EUR','  the clients’ house is in, jointly owned');
+    const hb=I('dcPensions','Harbourline');
+    ok(!!hb&&hb.fields.value===184500&&hb.fields.type==='Personal pension','  the Harbourline pension');
+    ok(hb.fields.policyNo==='HB-220931'&&hb.quotes.length===2,'  mentioned twice, kept as one, with both quotes');
+    ok(hb.fields.ccy===undefined,'  its currency was never said, so none is assumed');
+    /* a couple: what is said of both of them fills both */
+    const cj=blankClient();
+    cj.data.personal.a1={firstName:'Peter',surname:'Marlow'}; cj.data.personal.a2={firstName:'Helen',surname:'Marlow'};
+    const both={facts:[],items:[],stats:{returned:0,noEvidence:0,unknown:0,empty:0}};
+    txCheck(cj,tx,'Dana Hale',[{k:'personal.residence',who:'joint',v:'Portugal',q:'We live in Portugal, near Tavira.'},
+                              {k:'estate.will',who:'joint',v:'Yes',q:'Yes, we both did one in the UK but it is years old.'},
+                              {k:'employment.occupation',who:'1',v:'Marine engineer',q:'I am a marine engineer, self-employed these days.'}],both);
+    ok(both.facts.filter(x=>x.id==='residence').map(x=>x.who).sort().join()==='a1,a2','  for a couple, "we live in Portugal" fills both applicants');
+    ok(both.facts.filter(x=>x.id==='will').length===2,'  and "we both did one" answers the will question for both');
+    ok(both.facts.filter(x=>x.id==='occupation').length===1,'  while his own job stays his own');
+    ok(res.items.filter(x=>x.list==='dcPensions').length===2,'  two pensions in all');
+    ok(F('personal','firstName').value==='Peter'&&F('personal','surname').value==='Marlow','  and the client’s name, from the transcript itself');
+
+    /* ---------------- the screen ---------------- */
+    say('--- the review ---');
+    S.clientId=c.id; S.screen='client'; render();
+    ok(!!document.querySelector('[data-a="txOpen"]'),'  the client page has a Meeting transcript button');
+    ok(!!document.querySelector('[data-a="cashflowOpen"]')&&!!document.querySelector('[data-a="filesOpen"]'),'  beside the ones already there');
+    ACT.txOpen();
+    ok(!!document.querySelector('#txFile')&&!!document.querySelector('#txPaste'),'  asking for a file or pasted text');
+    ok(/not saved/i.test(document.querySelector('#modal').innerText),'  and saying the transcript is not saved');
+    dismissModal();
+    S.flow={mode:'tx',res}; txResultModal();
+    const M=()=>document.querySelector('#modal').innerText;
+    ok(/What the meeting said/.test(M()),'  the review opens');
+    ok(/thrown away/.test(M()),'  saying how many answers were thrown away');
+    ok(M().indexOf('married to Helen, thirty one years now')>=0,'  showing the words each answer came from');
+    ok(/Peter Marlow at 0:35/.test(M()),'  who said them and when');
+    ok(/replaces “Engineer”/.test(M()),'  what would be replaced');
+    ok(/said by the adviser/.test(M()),'  and what the adviser said');
+    ok(document.querySelectorAll('#modal [data-txu]').length===res.facts.length,'  one tick box per answer');
+    ok(document.querySelectorAll('#modal [data-txi]').length===res.items.length,'  and per item');
+
+    /* the adviser corrects a figure and unticks one before applying */
+    const salIdx=res.facts.indexOf(F('employment','salary'));
+    document.querySelector('#modal [data-txv="'+salIdx+'"]').value='74000';
+    const marIdx=res.facts.indexOf(F('personal','marital'));
+    document.querySelector('#modal [data-txu="'+marIdx+'"]').checked=false;
+    const hbIdx=res.items.indexOf(hb);
+    document.querySelector('#modal [data-txf="'+hbIdx+'|value"]').value='191200';
+    ACT.txApply();
+    await wait(50);
+
+    say('--- what went in ---');
+    const d=getClient(c.id).data;
+    ok(d.employment.a1.salary===74000,'  the corrected salary, not the one read');
+    ok(!d.personal.a1.marital,'  the unticked answer stayed out');
+    ok(d.employment.a1.occupation==='Engineer','  the adviser’s own occupation entry was left alone');
+    ok(d.employment.a1.status==='Self-employed','  employment status went in');
+    ok(d.retirement.a1.retireAge===63&&d.retirement.a1.desiredIncome===38000,'  retirement age and income went in');
+    ok(d.estate.a1.will==='Yes'&&d.estate.a1.willCountry==='United Kingdom','  the will answers went in');
+    ok(!d.estate.a1.inheritanceAmount,'  the flagged figure stayed out');
+    ok(!d.personal.a1.health,'  the answer with no matching option stayed out');
+    ok(d.personal.a1.firstName==='Peter'&&d.personal.a1.surname==='Marlow','  the name went in');
+    ok((d.properties||[]).length===1&&d.properties[0].location==='Tavira','  one property: the house, not the villa');
+    ok(d.properties[0].owner==='Joint'&&d.properties[0].value===450000&&!!d.properties[0]._id,'  jointly owned, with its value and a row id');
+    ok((d.dcPensions||[]).length===2,'  two pensions');
+    const hbRow=d.dcPensions.find(r=>/Harbourline/.test(r.name));
+    ok(hbRow.value===191200&&hbRow.owner==='Applicant 1'&&hbRow.policyNo==='HB-220931','  Harbourline at the corrected 191,200');
+    ok(/Filled from the meeting transcript/.test(d.meta.notes),'  and a note of where the answers came from');
+    ok(JSON.stringify(getClient(c.id)).indexOf('marine engineer, self-employed these days')<0,'  the transcript itself is not stored on the client');
+
+    /* ---------------- reading it again does not duplicate ---------------- */
+    say('--- a second read ---');
+    api=async function(m,p,b){ if(p==='/api/ai') return {text:JSON.stringify(canned)}; return _api(m,p,b); };
+    let res2; try{ res2=await txRun(getClient(c.id),lines,{}); } finally { api=_api; }
+    ok(!res2.facts.some(x=>x.sec==='retirement'&&x.id==='retireAge'),'  answers already in the Fact Find are not offered again');
+    const hb2=res2.items.find(x=>x.list==='dcPensions'&&/Harbourline/.test(x.fields.name));
+    ok(hb2.target===hbRow._id,'  and a pension already there is offered as an update, not a second copy');
+
+    /* ---------------- when the assistant is off ---------------- */
+    say('--- failure ---');
+    api=async function(m,p,b){ if(p==='/api/ai') throw new Error('The drafting assistant is not switched on for this server.'); return _api(m,p,b); };
+    let threw=''; try{ await txRun(c,lines,{}); }catch(e){ threw=e.message; } finally { api=_api; }
+    ok(/not switched on/.test(threw),'  if the assistant is off, it says so rather than returning nothing');
+    api=async function(m,p,b){ if(p==='/api/ai') throw new Error('The assistant could not be reached.'); return _api(m,p,b); };
+    let res3; try{ res3=await txRun(c,lines,{}); } finally { api=_api; }
+    ok(res3.stats.failed===1&&res3.facts.every(x=>x.fromLabel),'  if a part fails, it is counted and nothing is invented');
+
+  }catch(e){ L0.push('ERR '+e.message+' @ '+(e.stack||'').split(NL).slice(1,4).join(' ~ ')); }
+  return L0.join(NL);
+};
+</script>

@@ -1,0 +1,116 @@
+/* ===========================================================================
+   RWL TEMPLATES — the second Admin portal tool.
+
+   The letters are built from templates. Bring the templates in line with
+   the Sales Manual once, and the letters start compliant; RWL Review is then
+   only needed for the odd bounce-back. Upload a template, check it against
+   the manual, tick the changes you want, download the aligned template as
+   tracked changes, and the notes tell the team what the adviser now fills in.
+
+   Server side is in rwl_server.js (tplHandle). Helpers shared with wrwl.
+   ========================================================================= */
+const TPL={view:'list',list:[],cur:null,file:null,busy:'',info:null};
+const TPL_STATUS={uploaded:['Uploaded','info'],reviewed:['Changes proposed','or'],aligned:['Aligned','ok']};
+function tplBadge(s){ const x=TPL_STATUS[s]||[s,'mut']; return '<span class="bdg '+x[1]+'"><span class="dot"></span>'+esc(x[0])+'</span>'; }
+function tplBusy(){ return TPL.busy?'<div class="row" style="gap:8px;margin-top:12px"><span class="spin"></span><span class="small muted">'+esc(TPL.busy)+'</span></div>':''; }
+function tplSetInfo(kind,text){ TPL.info=text?{kind,text}:null; }
+function tplInfo(){ return TPL.info?'<div class="note '+esc(TPL.info.kind)+'" style="margin-top:12px"><span class="ic">'+ic(TPL.info.kind==='risk'?'alert':'info',15)+'</span><div>'+esc(TPL.info.text)+'</div></div>':''; }
+async function tplLoad(){ try{ const r=await rwlApi('GET','/api/rwltpl/list'); TPL.list=r.templates||[]; }catch(e){ TPL.list=[]; tplSetInfo('risk',e.message); } }
+async function tplOpen(id){ TPL.cur=await rwlApi('GET','/api/rwltpl/'+encodeURIComponent(id)); TPL.view='one'; tplSetInfo(); }
+
+function tplListHTML(){
+  let h='<div class="ph"><div><h1>RWL Templates</h1>'
+    +'<div class="sub">The templates the letters are built from, checked against the Sales Manual so letters start compliant.</div></div>'
+    +'<div class="sp row" style="gap:8px"><button class="btn" data-a="tplRefresh">'+ic('swap',15)+' Refresh</button>'
+    +'<button class="btn pri" data-a="tplNew">'+ic('plus',15)+' Add a template</button></div></div>'+tplInfo();
+  if(!TPL.list.length) return h+'<div class="card"><div class="empty"><div class="ei">'+ic('file',22)+'</div><h4>No templates yet</h4>'
+    +'<p>Add each RWL template as a Word file. Check it against the manual, accept the changes, and the aligned template is the one the team uses from then on.</p>'
+    +'<div class="row" style="justify-content:center;margin-top:16px"><button class="btn pri" data-a="tplNew">'+ic('plus',15)+' Add a template</button></div></div></div>';
+  h+='<div class="card"><div class="tw"><table class="t"><thead><tr><th>Template</th><th>Type</th><th>Status</th><th>Points</th><th>Updated</th><th>By</th><th style="width:40px"></th></tr></thead><tbody>';
+  TPL.list.forEach(t=>{ h+='<tr class="clk" data-a="tplOpen" data-v="'+esc(t.id)+'"><td class="b7">'+esc(t.name)+'</td><td>'+esc(t.kind||'—')+'</td><td>'+tplBadge(t.status)+'</td>'
+    +'<td class="mono muted">'+(t.findingsCount==null?'—':esc(t.findingsCount))+'</td><td class="tiny muted">'+esc(rwlWhen(t.updated))+'</td><td class="tiny muted">'+esc(t.createdBy||'')+'</td><td class="muted2">'+ic('chev',15)+'</td></tr>'; });
+  return h+'</tbody></table></div></div>';
+}
+function tplNewHTML(){
+  const f=TPL.file;
+  return '<div class="ph"><div><h1>Add a template</h1><div class="sub">The Word file the letters are built from.</div></div>'
+    +'<div class="sp"><button class="btn" data-a="tplHome">'+ic('chevL',15)+' All templates</button></div></div>'
+    +'<div class="card"><div class="card-b">'
+    +'<div class="grid" style="grid-template-columns:1fr 1fr">'
+    +'<div class="field"><label class="lbl">Template name <span class="req">*</span></label><input class="inp" id="tplName" placeholder="e.g. DC transfer RWL" value="'+esc(TPL.name||'')+'"></div>'
+    +'<div class="field"><label class="lbl">Type of advice</label><input class="inp" id="tplKind" placeholder="e.g. DC pension transfer, QROPS, investment" value="'+esc(TPL.kind||'')+'"></div></div>'
+    +'<div id="tplDrop" class="empty" style="border:2px dashed var(--line);border-radius:12px;padding:26px;cursor:pointer'+(f?';border-color:var(--ok)':'')+'">'
+    +'<div class="ei">'+ic(f?'check':'up',22)+'</div>'
+    +(f?'<h4>'+esc(f.name)+'</h4><p>'+Math.round(f.size/1024)+' KB · click to choose a different file</p>':'<h4>Drop the Word template here</h4><p>or click to choose it (.docx only)</p>')
+    +'</div><input type="file" id="tplFile" accept=".docx" style="display:none">'+tplInfo()+tplBusy()
+    +'<div class="row" style="margin-top:16px;gap:8px"><button class="btn pri" data-a="tplUpload"'+(f&&!TPL.busy?'':' disabled')+'>'+ic('up',15)+' Upload and continue</button>'
+    +'<button class="btn" data-a="tplHome">Cancel</button></div></div></div>';
+}
+function tplOneHTML(){
+  const t=TPL.cur, rv=t.review;
+  let h='<div class="ph"><div><h1>'+esc(t.name)+'</h1><div class="sub">'+(t.kind?esc(t.kind)+' · ':'')+esc(t.originalName||'')+' · '+tplBadge(t.status)
+    +(t.mergeFields?' · <span title="'+esc(t.mergeFields.join(', '))+'">'+t.mergeFields.length+' merge field'+(t.mergeFields.length===1?'':'s')+'</span>':'')+'</div></div>'
+    +'<div class="sp row" style="gap:8px"><button class="btn" data-a="tplHome">'+ic('chevL',15)+' All templates</button>'
+    +'<a class="btn" href="/api/rwltpl/'+esc(t.id)+'/download?which=original" download>'+ic('dl',15)+' Original</a>'
+    +'<button class="btn danger" data-a="tplDelete">'+ic('trash',15)+' Delete</button></div></div>'+tplInfo();
+  h+='<div class="card"><div class="card-h"><span class="av s or">1</span><div><h3>Check against the Sales Manual</h3><div class="sub">Reads the template against the manual and the checklist, and drafts the changes that bring it in line.</div></div>'
+    +'<button class="btn sp" data-a="tplCheck"'+(TPL.busy?' disabled':'')+'>'+ic('shield',15)+(rv?' Check again':' Check the template')+'</button></div>'
+    +'<div class="card-b">'+(TPL.busy==='check'?tplBusy():'')+(rv?rwlFindingsHTML({ready_to_submit:!rv.findings.length,summary:rv.summary,findings:rv.findings}):(TPL.busy?'':'<p class="small muted">Not checked yet.</p>'))+'</div></div>';
+  if(rv){
+    const dry=(t.result&&t.result.dry)||{applied:[],skipped:[]};
+    const cannot=new Map((dry.skipped||[]).map(s=>[s.k,s.why]));
+    h+='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">2</span><div><h3>Changes to the template</h3><div class="sub">Untick anything you do not want. Everything ticked is written into the template as a tracked change.</div></div></div><div class="card-b">';
+    if(!rv.edits.length) h+='<p class="muted">No changes needed.</p>';
+    rv.edits.forEach((e,k)=>{ const no=cannot.has(k);
+      h+='<div style="display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-top:1px solid var(--line-2)'+(no?';opacity:.55':'')+'">'
+        +'<input type="checkbox" class="tplTick" data-k="'+k+'"'+(no?' disabled':' checked')+' style="margin-top:3px">'
+        +'<div style="min-width:0;flex:1"><div class="small muted" style="margin-bottom:5px"><span class="bdg info">'+esc(e.point)+'</span> &nbsp;'+esc(RWL_OPS[e.op]||e.op)+' ['+esc(e.para)+'] <em>“'+esc(String(e.anchor||'').slice(0,70))+'…”</em>'
+        +(no?' — <b style="color:var(--risk)">cannot be placed: '+esc(cannot.get(k))+'</b>':'')+'</div>'
+        +(e.op==='delete'?'':'<div style="background:var(--card-2);border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;white-space:pre-wrap;font-size:13px">'+(e.lead?'<b>'+esc(e.lead)+'</b> ':'')+esc(e.text)+'</div>')
+        +'<div class="hint">'+esc(e.reason)+'</div></div></div>'; });
+    h+=tplBusy()+(rv.edits.length?'<div class="row" style="margin-top:14px"><button class="btn blue" data-a="tplApply"'+(TPL.busy?' disabled':'')+'>'+ic('save',15)+' Write the aligned template</button></div>':'')+'</div></div>';
+    const r=t.result;
+    if(r&&r.insertions!=null) h+='<div class="card" style="margin-top:16px;border-color:var(--'+(r.merge&&r.merge.missing&&r.merge.missing.length?'risk':'ok')+')"><div class="card-h"><span class="av s" style="background:var(--ok-t);color:var(--ok-ink)">'+ic('check',14)+'</span><h3>Aligned template</h3></div><div class="card-b">'
+      +'<p class="small">'+r.applied+' change'+(r.applied===1?'':'s')+' written as tracked changes ('+r.insertions+' insertions, '+r.deletions+' deletions). Open it in Word, accept the changes, and save it as the template the team uses.</p>'
+      +(r.merge?(r.merge.missing&&r.merge.missing.length
+        ?'<div class="note risk mb"><span class="ic">'+ic('alert',15)+'</span><div><b>Mail merge: '+r.merge.missing.length+' field'+(r.merge.missing.length===1?'':'s')+' would be lost</b> once the changes are accepted: «'+r.merge.missing.map(esc).join('», «')+'». Reject the change that removes them, or put the field back before saving.</div></div>'
+        :'<div class="note ok mb"><span class="ic">'+ic('check',15)+'</span><div><b>Mail merge safe.</b> All '+r.merge.before+' merge field'+(r.merge.before===1?'':'s')+' in the template are still there once the changes are accepted'+(r.merge.after>r.merge.before?' ('+(r.merge.after-r.merge.before)+' more use'+(r.merge.after-r.merge.before===1?'':'s')+' of existing fields added)':'')+'. The MADS merge will work as before.</div></div>'):'')
+      +'<div class="row" style="margin:12px 0 18px"><a class="btn pri" href="/api/rwltpl/'+esc(t.id)+'/download?which=redlined" download>'+ic('dl',15)+' Download aligned template</a></div>'
+      +'<label class="lbl">Notes for the team</label><textarea class="ta" id="tplNotes" rows="7" readonly>'+esc(rv.notes||'')+'</textarea>'
+      +'<div class="row" style="margin-top:8px"><button class="btn sm" data-a="tplCopy">'+ic('copy',14)+' Copy notes</button></div></div></div>';
+  }
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><h3>History</h3></div><div class="card-b flush"><div class="tw"><table class="t"><tbody>'
+    +((t.events||[]).slice().reverse().map(e=>'<tr><td class="tiny muted" style="white-space:nowrap">'+esc(rwlWhen(e.at))+'</td><td class="tiny">'+esc(e.who||'')+'</td><td class="tiny" style="white-space:normal">'+esc(e.what)+'</td></tr>').join('')||'<tr><td class="tiny muted">Nothing yet</td></tr>')
+    +'</tbody></table></div></div></div>';
+  return h;
+}
+function screenTpl(){ return TPL.view==='new'?tplNewHTML():(TPL.view==='one'&&TPL.cur)?tplOneHTML():tplListHTML(); }
+
+adminTool({id:'tpl',name:'RWL Templates',icon:'file',action:'tplHome',screen:screenTpl,count:()=>TPL.list.length,
+  desc:'Bring the RWL templates in line with the Sales Manual once, so every letter built from them starts compliant. Upload a template, check it, accept the changes, download the aligned version.'});
+async function tplRun(kind,fn){ TPL.busy=kind; tplSetInfo(); render(); try{ await fn(); }catch(e){ tplSetInfo('risk',e.message||'Something went wrong.'); } TPL.busy=''; render(); }
+Object.assign(ACT,{
+  async tplHome(){ S.screen='tpl'; TPL.view='list'; TPL.cur=null; tplSetInfo(); render(); await tplLoad(); render(); window.scrollTo(0,0); },
+  tplRefresh(){ tplRun('list',async()=>{ await tplLoad(); }); },
+  tplNew(){ TPL.view='new'; TPL.file=null; TPL.name=''; TPL.kind=''; tplSetInfo(); render(); },
+  tplOpen(v){ tplRun('open',async()=>{ await tplOpen(v); }); },
+  tplUpload(){
+    TPL.name=(($('#tplName')||{}).value||'').trim(); TPL.kind=(($('#tplKind')||{}).value||'').trim();
+    if(!TPL.name){ tplSetInfo('warn','Give the template a name first.'); render(); return; }
+    if(!TPL.file){ tplSetInfo('warn','Choose the Word file first.'); render(); return; }
+    tplRun('upload',async()=>{ const fd=new FormData(); fd.append('name',TPL.name); fd.append('kind',TPL.kind); fd.append('file',TPL.file);
+      const r=await rwlApi('POST','/api/rwltpl/upload',null,fd); TPL.file=null; await tplOpen(r.id); await tplLoad(); toast('Template added',r.paragraphs+' paragraphs read.'); });
+  },
+  tplCheck(){ tplRun('check',async()=>{ const r=await rwlApi('POST','/api/rwltpl/'+encodeURIComponent(TPL.cur.id)+'/check'); await tplOpen(TPL.cur.id);
+    toast(r.review.edits.length?'Changes proposed':'In line with the manual',r.review.findings.length+' finding(s), '+r.review.edits.length+' change(s).',r.review.edits.length?'warn':'ok'); }); },
+  tplApply(){ const skip=[...document.querySelectorAll('.tplTick')].filter(c=>!c.checked).map(c=>Number(c.dataset.k));
+    tplRun('apply',async()=>{ const r=await rwlApi('POST','/api/rwltpl/'+encodeURIComponent(TPL.cur.id)+'/apply',{skip}); await tplOpen(TPL.cur.id); toast('Aligned template written',r.applied+' change(s) as tracked changes.','ok'); }); },
+  tplDelete(){ if(!confirm('Delete this template and its aligned copy?')) return; tplRun('delete',async()=>{ await rwlApi('DELETE','/api/rwltpl/'+encodeURIComponent(TPL.cur.id)); TPL.view='list'; TPL.cur=null; await tplLoad(); }); },
+  tplCopy(){ const t=$('#tplNotes'); if(!t) return; navigator.clipboard.writeText(t.value).then(()=>toast('Copied','The notes are on your clipboard.')); }
+});
+document.addEventListener('click',e=>{ if(e.target.closest('#tplDrop')){ const i=$('#tplFile'); if(i) i.click(); } });
+document.addEventListener('change',e=>{ if(e.target&&e.target.id==='tplFile'&&e.target.files[0]) tplPick(e.target.files[0]); });
+document.addEventListener('dragover',e=>{ if(e.target.closest&&e.target.closest('#tplDrop')) e.preventDefault(); });
+document.addEventListener('drop',e=>{ const z=e.target.closest&&e.target.closest('#tplDrop'); if(z){ e.preventDefault(); if(e.dataTransfer.files[0]) tplPick(e.dataTransfer.files[0]); } });
+function tplPick(f){ TPL.name=(($('#tplName')||{}).value||'').trim(); TPL.kind=(($('#tplKind')||{}).value||'').trim();
+  if(!/\.docx$/i.test(f.name)){ tplSetInfo('warn','That is not a Word .docx file.'); render(); return; } TPL.file=f; tplSetInfo(); render(); }

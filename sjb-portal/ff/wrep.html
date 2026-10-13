@@ -1,0 +1,538 @@
+/* ===========================================================================
+   SUITABILITY REPORTS
+   The four Word templates are ordinary mail-merge documents whose field names
+   are the MADS Template column headings, sanitised by Word (spaces become
+   underscores, punctuation is dropped, long names are truncated). So the
+   values already exist: the same madsValues() that fills the workbook fills
+   the report, with a set of report-only figures added below.
+
+   Templates are uploaded once and stored on the server for the whole
+   practice; generating is then one click per client.
+   ========================================================================= */
+
+/* Starting points, offered as one-click slots on an empty Reports screen.
+   Any other report can be added by name — nothing here is fixed. */
+const REPORT_SUGGESTED=[
+  {key:'ajtrans', name:'Pension Transfer — AJ Bell',
+   desc:'Transferring one or more UK personal pensions into an AJ Bell SIPP.'},
+  {key:'novia',   name:'Pension Transfer — Novia Global',
+   desc:'Transferring one or more UK personal pensions into a Novia Global International SIPP.'},
+  {key:'topup',   name:'SIPP Top Up — AJ Bell',
+   desc:'An additional contribution into an existing AJ Bell SIPP.'},
+  {key:'lump',    name:'Cash Lump Sum Pension — AJ Bell',
+   desc:'Taking a cash lump sum from a pension.'}
+];
+function reportKeyFor(title){
+  const base=String(title||'report').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,20)||'report';
+  let k=base, n=2;
+  while(REPORT_TPL&&REPORT_TPL[k]) k=base+'-'+(n++);
+  return k;
+}
+/* every uploaded template, in the order they were added */
+function reportList(){
+  const t=REPORT_TPL||{};
+  return Object.keys(t).map(k=>({key:k,name:t[k].title||(reportSuggested(k)||{}).name||t[k].name||k,
+    desc:(reportSuggested(k)||{}).desc||'',tpl:t[k]}));
+}
+function reportSuggested(k){ return REPORT_SUGGESTED.find(r=>r.key===k); }
+function reportType(k){
+  const t=(REPORT_TPL||{})[k];
+  return {key:k,name:(t&&t.title)||(reportSuggested(k)||{}).name||(t&&t.name)||k};
+}
+
+/* ---------------------- Word's field-name sanitising --------------------- */
+/* Newlines vanish, spaces become underscores, everything else non-alphanumeric
+   is dropped, and the result is truncated — the length varies, and Word
+   replaces the last character with a digit when two columns would collide.
+   Rather than reproduce that exactly we resolve by prefix, which is stable. */
+function wordSan(s){
+  return String(s||'').replace(/[\r\n]/g,'').replace(/ /g,'_').replace(/[^A-Za-z0-9_]/g,'');
+}
+/* the two names in these templates that no longer match a V.28 column head-on */
+const REPORT_ALIASES={ M_10_year_RIY:'10 year RIY', Total_monetary_charges:'Total ongoing fees monetary',
+  Middle_name_1:'Middle Name' };
+/* Money that can legitimately be negative — a charge comparison can go either
+   way, and "£-1,263" reads as a typo. */
+function repMoney(v,ccy){
+  const n=Number(v); if(!isFinite(n)) return null;
+  return (n<0?'-':'')+money(Math.abs(n),ccy);
+}
+
+function buildFieldResolver(headers){
+  const list=headers.map(h=>({h,s:wordSan(h)}));
+  const byExact={}; list.forEach(x=>{ if(!(x.s in byExact)) byExact[x.s]=x.h; });
+  const byTrim={}; list.forEach(x=>{ const k=x.s.replace(/_+$/,''); if(!(k in byTrim)) byTrim[k]=x.h; });
+  const sorted=list.slice().sort((a,b)=>a.s.length-b.s.length);
+  return function(field){
+    if(REPORT_ALIASES[field]) return REPORT_ALIASES[field];
+    if(byExact[field]) return byExact[field];
+    const t=field.replace(/_+$/,'');
+    if(byTrim[t]) return byTrim[t];
+    let hit=sorted.find(x=>x.s.indexOf(field)===0);
+    if(hit) return hit.h;
+    if(/\d$/.test(field)){                       /* Word's uniqueness suffix */
+      const stem=field.slice(0,-1);
+      const all=sorted.filter(x=>x.s.indexOf(stem)===0);
+      if(all.length) return all[all.length-1].h;
+    }
+    return null;
+  };
+}
+
+/* ------------------- values the reports need on top of MADS -------------- */
+function reportValues(c){
+  const V=madsValues(c);                       /* everything the workbook gets */
+  const base=cfBase(c), r=recOf(c);
+  const put=(k,v)=>{ if(v!=null&&v!=='') V[k]=v; };
+  const num=v=>{ const n=Number(v); return isFinite(n)?n:null; };
+  const pc=v=>{ const n=num(v); return n==null?null:(n+'%'); };
+  const gbp=(v,ccy)=>{ const n=num(v); return n==null?null:money(n,ccy||r.ccy||base); };
+  const P=c.data.personal||{}, a=P.a1||{}, E=(c.data.employment||{}).a1||{}, X=c.data.incomeExp||{};
+  const Q=(c.data.risk||{}).a1||{}, EST=(c.data.estate||{}).a1||{};
+
+  /* --- circumstances the reports quote --- */
+  put('Middle Name',a.middleName);
+  put('UK Tax Payer',(a.taxResidence==='United Kingdom')?'Yes':'No');
+  put('UK move abroad',(a.residence&&a.residence!=='United Kingdom')?'Yes':'No');
+  put('Is will up to date?',EST.willCurrent||EST.will);
+  put('Do you have a will? ',EST.will);
+  put('UK Risk profile',Q.atrChosen);
+  put('UK RPQ Capacity for loss',Q.capacity);
+
+  /* --- income and expenditure totals the reports print --- */
+  const gross=(num(E.salary)||0)+(num(E.bonus)||0);
+  const expTotal=['expTotal','expMortgage','expLoans','expCards'].reduce((t,k)=>t+(num(X[k])||0),0);
+  if(gross) put('Income Individual Total Gross Income (from all above sources)',money(gross,base));
+  if(gross) put('Income Individual Total Net Income (from all above sources)',money(Math.round(gross*0.75),base));
+  if(expTotal) put('Expenditure Individual Total Annual Expenditure (individual not joint)',money(expTotal,base));
+  if(gross||expTotal) put('Expenditure Individual Annual surplus',money(gross-expTotal,base));
+
+  /* --- the ceding pensions, as the report tables expect them --- */
+  const pens=(c.data.dcPensions||[]).slice(0,10);
+  let cedingValue=0, cedingCharge=0;
+  pens.forEach((p,i)=>{
+    const n=i+1, v=num(p.value)||0, amc=num(p.amc);
+    cedingValue+=v;
+    const annual=amc!=null?v*amc/100:null;
+    if(annual!=null) cedingCharge+=annual;
+    put('UK PI DC '+n+' Owner',mOwner(p.owner));
+    put('UK PI DC '+n+' Pension Name ',p.name);
+    put('UK PI DC '+n+' Policy Number',p.policyNo);
+    put('UK DC '+n+' Policy Number',p.policyNo);          /* the lump-sum template's spelling */
+    put('UK PI DC '+n+' Value',gbp(p.value,p.ccy));
+    put('UK PI DC '+n+'  Value',gbp(p.value,p.ccy));      /* double space in one column */
+    put('UK PI DC '+n+' Fund Value',gbp(p.value,p.ccy));
+    put('UK PI DC '+n+' TVQ Amount',gbp(p.tvq,p.ccy));
+    put('UK PI DC '+n+' Date of TVQ',p.tvqDate?fdate(p.tvqDate):(p.valuedAt?fdate(p.valuedAt):null));
+    put('UK PI DC '+n+' Annual Charges',pc(p.amc));
+    put('UK PI DC '+n+' Exit Fee/Bonus',p.exitFee||'None');
+    put('UK PI DC '+n+' Guarantees or bonuses ',p.guarantees||'None');
+    if(annual!=null) put('DC - Annual monetary amount '+n,money(annual,p.ccy||base));
+  });
+
+  /* --- the recommendation and its charges --- */
+  const premium=num(r.amount)||cedingValue||0;
+  const initialPc=num(r.initial), ongoingPc=num(r.ongoing);
+  const platformPc=num(r.platformFee), ocfPc=num(r.ocf), dfmPc=num(r.dfmFee);
+  put('Reco PREMIUM INVESTED',premium?money(premium,r.ccy||base):null);
+  put('Reco Currency of premium',r.ccy||base);
+  put('Reco SJB Initial Adviser fee %',pc(initialPc));
+  put('Reco  SJB Ongoing Adviser Fee %',pc(ongoingPc));
+  const initialMoney=(initialPc!=null&&premium)?premium*initialPc/100:null;
+  put('Reco\nInitial Adviser fee monetary',initialMoney!=null?money(initialMoney,r.ccy||base):null);
+  const postInitial=initialMoney!=null?premium-initialMoney:premium;
+  put('Reco fee post initial',postInitial?money(postInitial,r.ccy||base):null);
+  put('Premium post initial fee',postInitial?money(postInitial,r.ccy||base):null);
+  put('Reco Chosen Platform Annual Fee',pc(platformPc));
+  if(platformPc!=null&&postInitial) put('Reco Chosen platform annual fee monetary',money(postInitial*platformPc/100,r.ccy||base));
+  put('Reco Aggregated Annual Total Expense Ratio',pc(ocfPc));
+  if(ocfPc!=null&&postInitial) put('Aggregated Annual Total Expense Ratio monetary',money(postInitial*ocfPc/100,r.ccy||base));
+  put('DFM AMC monetary',(dfmPc!=null&&postInitial)?money(postInitial*dfmPc/100,r.ccy||base):null);
+  /* total ongoing: platform + fund OCF + DFM + adviser */
+  const ongoingParts=[platformPc,ocfPc,dfmPc,ongoingPc].filter(x=>x!=null);
+  const totalOngoing=ongoingParts.length?ongoingParts.reduce((t,x)=>t+x,0):null;
+  const exAdviser=[platformPc,ocfPc,dfmPc].filter(x=>x!=null);
+  if(exAdviser.length) put('Total fees on plan ex. IFA fee',exAdviser.reduce((t,x)=>t+x,0).toFixed(2)+'%');
+  if(totalOngoing!=null){
+    put('Total ongoing costs as a percentage',totalOngoing.toFixed(2)+'%');
+    put('UK Total Ongoing fees post inital',totalOngoing.toFixed(2)+'%');
+    if(postInitial) put('Total ongoing fees monetary',money(postInitial*totalOngoing/100,r.ccy||base));
+    /* "10 year RIY" is deliberately NOT calculated. Reduction in yield is a
+       compounding figure that depends on the growth rate and the fee timing,
+       and a wrong one in a suitability report is a compliance problem. It is
+       left blank for the adviser to take from the provider's illustration. */
+  }
+  /* --- existing versus recommended, per pension --- */
+  pens.forEach((p,i)=>{
+    const n=i+1, v=num(p.value)||0, amc=num(p.amc);
+    if(amc==null||totalOngoing==null||!v) return;
+    const before=v*amc/100, after=v*totalOngoing/100;
+    put('Monetary difference '+n,repMoney(before-after,p.ccy||base));
+    put('Pre to post  change '+n,(totalOngoing-amc).toFixed(2)+'%');
+  });
+  return V;
+}
+
+/* --------------------------- the DOCX merge ------------------------------ */
+/* Word writes a merge field either as a single <w:fldSimple>, or as a run
+   sequence: begin → instrText → separate → cached result → end. Both are
+   replaced with a plain run so the finished document has no live fields left
+   to refresh (and no prompt to reconnect a data source when it opens). */
+const W_NS='http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+function docxMergeXml(xml,lookup,stats){
+  const doc=new DOMParser().parseFromString(xml,'application/xml');
+  const mkRun=(template,text)=>{
+    const r=doc.createElementNS(W_NS,'w:r');
+    if(template){
+      const rPr=template.getElementsByTagNameNS(W_NS,'rPr')[0];
+      if(rPr) r.appendChild(rPr.cloneNode(true));
+    }
+    const parts=String(text==null?'':text).split(/\r?\n/);
+    parts.forEach((p,i)=>{
+      if(i){ r.appendChild(doc.createElementNS(W_NS,'w:br')); }
+      const t=doc.createElementNS(W_NS,'w:t');
+      t.setAttribute('xml:space','preserve');
+      t.appendChild(doc.createTextNode(p));
+      r.appendChild(t);
+    });
+    return r;
+  };
+  const fieldName=instr=>{
+    const m=/MERGEFIELD\s+("?)([^"\\]+)\1/.exec(instr||'');
+    return m?m[2].trim():null;
+  };
+  /* --- simple fields --- */
+  Array.from(doc.getElementsByTagNameNS(W_NS,'fldSimple')).forEach(fs=>{
+    const name=fieldName(fs.getAttribute('w:instr'));
+    if(!name) return;
+    const val=lookup(name,stats);
+    const tmpl=fs.getElementsByTagNameNS(W_NS,'r')[0];
+    fs.parentNode.replaceChild(mkRun(tmpl,val),fs);
+  });
+  /* --- complex fields --- */
+  let guard=0;
+  while(guard++<5000){
+    const runs=Array.from(doc.getElementsByTagNameNS(W_NS,'r'));
+    let start=-1,sep=-1,end=-1,instr='',depth=0;
+    for(let i=0;i<runs.length;i++){
+      const fc=runs[i].getElementsByTagNameNS(W_NS,'fldChar')[0];
+      if(fc){
+        const t=fc.getAttribute('w:fldCharType');
+        if(t==='begin'){ if(depth===0){ start=i; sep=-1; instr=''; } depth++; }
+        else if(t==='separate'){ if(depth===1&&sep<0) sep=i; }
+        else if(t==='end'){ depth--; if(depth===0&&start>=0){ end=i; break; } }
+      } else if(depth>=1&&start>=0){
+        const it=runs[i].getElementsByTagNameNS(W_NS,'instrText')[0];
+        if(it) instr+=it.textContent;
+      }
+    }
+    if(end<0||start<0) break;
+    const name=fieldName(instr);
+    const range=runs.slice(start,end+1);
+    if(name){
+      const val=lookup(name,stats);
+      const tmpl=sep>=0?runs[Math.min(sep+1,end-1)]:runs[start];
+      const rep=mkRun(tmpl,val);
+      range[0].parentNode.insertBefore(rep,range[0]);
+    }
+    range.forEach(r=>{ if(r.parentNode) r.parentNode.removeChild(r); });
+    if(!name) stats.skipped=(stats.skipped||0)+1;
+  }
+  /* Some placeholders are plain «Field_Name» text rather than real fields —
+     usually on a cover page that was retyped. Fill those too; leaving them
+     would put «First_Name» in front of a client. */
+  Array.from(doc.getElementsByTagNameNS(W_NS,'t')).forEach(t=>{
+    const txt=t.textContent;
+    if(!txt||txt.indexOf('«')<0) return;
+    const next=txt.replace(/«([A-Za-z0-9_]+)»/g,(whole,name)=>{
+      const v=lookup(name,stats);
+      if(v!==''&&v!=null) return String(v);
+      /* A field we understand but have no value for should disappear — an
+         empty middle name must not print as «Middle_name_1» on a cover page.
+         One we cannot place at all stays visible so it is not missed. */
+      return (stats.known&&stats.known(name))?'':whole;
+    });
+    if(next!==txt){ t.textContent=next; t.setAttribute('xml:space','preserve'); }
+  });
+  return new XMLSerializer().serializeToString(doc);
+}
+
+async function buildReport(templateBlob,c,typeKey){
+  const entries=readZip(await templateBlob.arrayBuffer());
+  /* resolve field names against the client's own MADS wiring when we have it,
+     otherwise the built-in column list */
+  const headers=(typeof MADS_COLS!=='undefined'&&MADS_COLS.length)?MADS_COLS:Object.keys(MADS_CELLS||{});
+  const resolve=buildFieldResolver(headers);
+  const V=reportValues(c);
+  const stats={filled:0,blank:0,unresolved:[],used:[],known:f=>!!resolve(f)};
+  const lookup=(field)=>{
+    const header=resolve(field);
+    if(!header){ stats.unresolved.push(field); stats.blank++; return ''; }
+    const val=V[header];
+    if(val==null||val===''){ stats.blank++; return ''; }
+    stats.filled++; stats.used.push(field);
+    return val;
+  };
+  for(const e of entries){
+    if(!/^word\/(document|header\d*|footer\d*)\.xml$/.test(e.name)) continue;
+    const xml=await entryText(e);
+    if(xml.indexOf('MERGEFIELD')<0) continue;
+    e.newText=docxMergeXml(xml,lookup,stats);
+  }
+  const blob=await writeZip(entries);
+  stats.unresolved=[...new Set(stats.unresolved)];
+  return {blob,stats};
+}
+
+/* ------------------------------- screen ---------------------------------- */
+let REPORT_TPL=null;   /* {key: {id,name,size,at}} */
+async function loadReportTemplates(){
+  try{ REPORT_TPL=(await api('GET','/api/report-templates')).templates||{}; }catch(e){ REPORT_TPL={}; }
+}
+function screenReports(){
+  const tpl=REPORT_TPL||{};
+  const have=reportList();
+  const missing=REPORT_SUGGESTED.filter(s=>!tpl[s.key]);
+  let h='<div class="ph"><div><h1>Reports</h1>'
+    +'<div class="sub">Your suitability report templates. Add each one once — then it is a click per client.</div></div>'
+    +'<div class="sp"><button class="btn pri" data-a="repAdd">'+ic('plus',15)+' Add a report</button></div></div>';
+  h+='<div class="grid g2">';
+  have.forEach(rt=>{
+    const t=rt.tpl;
+    h+='<div class="card"><div class="card-h"><span style="color:var(--ok)">'+ic('file',18)+'</span>'
+      +'<div style="min-width:0"><h3>'+esc(rt.name)+'</h3>'
+      +(rt.desc?'<div class="sub">'+esc(rt.desc)+'</div>':'<div class="sub trunc">'+esc(t.name)+'</div>')+'</div>'
+      +'<span class="bdg ok sp"><span class="dot"></span>ready</span>'
+      +'</div><div class="card-b">'
+      +'<div class="kv"><span class="k">Template</span><span class="v trunc">'+esc(t.name)+'</span></div>'
+      +'<div class="kv"><span class="k">Added</span><span class="v">'+esc(fdt(t.at))+(t.uploadedBy?' · '+esc(t.uploadedBy):'')+'</span></div>'
+      +'<div class="row wrapf mt" style="gap:7px">'
+      +'<button class="btn sm pri" data-a="repPick" data-v="'+esc(rt.key)+'">'+ic('file',14)+' Create for a client</button>'
+      +'<button class="btn sm" data-a="repFields" data-v="'+esc(rt.key)+'">Check the merge fields</button>'
+      +'<label class="btn sm ghost" style="cursor:pointer">Replace<input type="file" accept=".docx" data-rep="'+esc(rt.key)+'" style="display:none"></label>'
+      +'<button class="btn sm ghost danger sp" data-a="repDel" data-v="'+esc(rt.key)+'">'+ic('trash',14)+'</button>'
+      +'</div>'
+      +'<div class="upbar" id="repbar-'+esc(rt.key)+'" style="height:6px;background:var(--line-2);border-radius:6px;overflow:hidden;display:none;margin-top:8px"><i style="display:block;height:100%;width:0;background:var(--orange)"></i></div>'
+      +'</div></div>';
+  });
+  missing.forEach(rt=>{
+    h+='<div class="card" style="border-style:dashed"><div class="card-h"><span style="color:var(--ink-4)">'+ic('file',18)+'</span>'
+      +'<div style="min-width:0"><h3 class="muted">'+esc(rt.name)+'</h3><div class="sub">'+esc(rt.desc)+'</div></div>'
+      +'<span class="bdg mut sp">not added</span></div><div class="card-b">'
+      +'<label class="btn blk" style="cursor:pointer">'+ic('up',15)+' Upload this template'
+      +'<input type="file" accept=".docx" data-rep="'+esc(rt.key)+'" style="display:none"></label>'
+      +'<div class="upbar" id="repbar-'+esc(rt.key)+'" style="height:6px;background:var(--line-2);border-radius:6px;overflow:hidden;display:none;margin-top:8px"><i style="display:block;height:100%;width:0;background:var(--orange)"></i></div>'
+      +'</div></div>';
+  });
+  if(!have.length&&!missing.length) h+='<div class="card"><div class="empty"><div class="ei">'+ic('file',24)+'</div>'
+    +'<h4>No reports yet</h4><p>Add a Word mail-merge template and it becomes available to every adviser.</p>'
+    +'<div class="mt"><button class="btn pri" data-a="repAdd">Add a report</button></div></div></div>';
+  h+='</div>';
+  h+='<div class="note info mt"><span class="ic">'+ic('info',15)+'</span><div>The templates are ordinary mail-merge '
+    +'documents. Their field names are MADS column headings, so everything the portal already knows about a client '
+    +'flows straight in — personal details, the existing pensions, the recommendation and its charges. Fields with '
+    +'nothing behind them are left empty rather than filled with a guess.</div></div>';
+  setTimeout(()=>{
+    $$('[data-rep]').forEach(inp=>inp.addEventListener('change',e=>repUpload(e.target.dataset.rep,e.target.files[0])));
+  },0);
+  return h;
+}
+async function repUpload(key,file,title){
+  if(!file) return;
+  const bar=$('#repbar-'+key), fill=bar&&bar.querySelector('i');
+  if(bar) bar.style.display='block';
+  try{
+    const buf=new Uint8Array(await file.arrayBuffer());
+    const CH=600*1024, total=Math.ceil(buf.length/CH)||1; let fileId=null;
+    for(let i=0;i<total;i++){
+      const part=buf.subarray(i*CH,Math.min((i+1)*CH,buf.length));
+      let s=''; for(let j=0;j<part.length;j+=0x8000) s+=String.fromCharCode.apply(null,part.subarray(j,Math.min(j+0x8000,part.length)));
+      const r=await api('POST','/api/upload',{fileId,name:file.name,scope:'report',key,
+        title:title||reportType(key).name,   /* replacing keeps the name it already has */
+        size:buf.length,totalChunks:total,index:i,dataB64:btoa(s)});
+      fileId=r.fileId; if(fill) fill.style.width=Math.round((i+1)/total*100)+'%';
+    }
+    await loadReportTemplates(); render();
+    toast('Template added',reportType(key).name+' is ready to use.');
+  }catch(e){ toast('Upload failed',e.message,'risk',8000); if(bar) bar.style.display='none'; }
+}
+
+Object.assign(ACT,{
+  repAdd(){
+    let h=mHead('Add a report','Any Word mail-merge document. Its fields are matched to the MADS columns automatically.');
+    h+='<div class="m-b">'
+      +'<div class="field"><label class="lbl">What is this report called? <span class="req">*</span></label>'
+      +'<input class="inp" id="repTitle" placeholder="e.g. ISA Transfer — Novia Global"></div>'
+      +'<div class="field"><label class="lbl">The template (.docx) <span class="req">*</span></label>'
+      +'<input type="file" id="repFile" class="inp" accept=".docx"></div>'
+      +'<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>Once added it is available to every '
+      +'adviser, and appears in the drop-down on each client. Use <b>Check the merge fields</b> afterwards to see '
+      +'exactly what will fill and what will not.</div></div>'
+      +'<div class="upbar" id="repbar-new" style="height:6px;background:var(--line-2);border-radius:6px;overflow:hidden;display:none;margin-top:8px"><i style="display:block;height:100%;width:0;background:var(--orange)"></i></div>'
+      +'</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+      +'<button class="btn pri" data-a="repAddGo">'+ic('up',14)+' Add it</button></div>';
+    openModal(h);
+  },
+  async repAddGo(){
+    const title=(($('#repTitle')||{}).value||'').trim();
+    const file=(($('#repFile')||{}).files||[])[0];
+    if(!title){ toast('Give it a name','So you can tell it apart on the client screen.','warn'); return; }
+    if(!file){ toast('Choose the template','Pick the .docx file.','warn'); return; }
+    const key=reportKeyFor(title);
+    const bar=$('#repbar-new'); if(bar) bar.id='repbar-'+key;
+    await repUpload(key,file,title);
+    dismissModal(); render();
+  },
+  repDel(v){
+    const rt=reportType(v);
+    confirmModal('Remove '+rt.name+'?','The template is deleted for everyone. Reports already created are unaffected.',
+      'Remove template','repDelGo',v);
+  },
+  async repDelGo(v){
+    const t=(REPORT_TPL||{})[v]; if(!t){ dismissModal(); return; }
+    try{ await api('DELETE','/api/files/'+encodeURIComponent(t.id)); }catch(e){ toast('Could not remove it',e.message,'warn'); }
+    await loadReportTemplates(); dismissModal(); render();
+    toast('Removed','The template is no longer available.');
+  },
+  /* the drop-down on a client */
+  async clientReport(){
+    const c=getClient(S.clientId); if(!c) return;
+    if(REPORT_TPL===null) await loadReportTemplates();
+    const list=reportList();
+    let h=mHead('Create a report','For '+clientName(c));
+    h+='<div class="m-b">';
+    if(!list.length){
+      h+='<div class="empty"><div class="ei">'+ic('file',22)+'</div><h4>No report templates yet</h4>'
+        +'<p>Add your Word templates under <b>Reports</b> and they will appear here.</p>'
+        +'<div class="mt"><button class="btn pri" data-a="repGoSection">Open Reports</button></div></div>';
+    } else {
+      const r=recOf(c), gaps=[];
+      if(!(r.provider||r.amount)) gaps.push('the recommended product and its charges');
+      if(!r.ukNarrative) gaps.push('the UK advice paragraph');
+      if(!r.mainObjectives) gaps.push('the main objectives');
+      if(gaps.length) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span>'
+        +'<div>Nothing recorded for '+esc(gaps.join(', ').replace(/, ([^,]*)$/,' and $1'))+' — those parts '
+        +'come out blank. Fill in <b>Fact Find → Recommendation</b> first (its <b>Build all four</b> button writes '
+        +'the narrative for you) for a complete report.</div></div>';
+      h+='<div class="stack">'+list.map(rt=>
+        '<button class="btn blk" style="justify-content:flex-start;padding:12px 14px;text-align:left" '
+        +'data-a="repGo" data-v="'+esc(rt.key)+'|'+esc(c.id)+'">'
+        +'<span style="color:var(--blue)">'+ic('file',16)+'</span>'
+        +'<span style="flex:1;min-width:0"><span class="b7" style="display:block">'+esc(rt.name)+'</span>'
+        +(rt.desc?'<span class="tiny muted" style="display:block;white-space:normal;font-weight:500">'+esc(rt.desc)+'</span>':'')
+        +'</span>'+ic('chev',15)+'</button>').join('')+'</div>';
+    }
+    h+='</div><div class="m-f"><button class="btn" data-a="close">Cancel</button></div>';
+    openModal(h);
+  },
+  repGoSection(){ dismissModal(); S.screen='reports'; render(); },
+  repPick(v){
+    const list=DB.clients.filter(c=>!isPlanOnly(c))
+      .sort((a,b)=>(b.updated||'').localeCompare(a.updated||''));
+    if(!list.length){ toast('No clients yet','Add a client first.','warn'); return; }
+    const rt=reportType(v);
+    let h=mHead(rt.name,'Which client is this report for?');
+    h+='<div class="m-b"><div class="stack">'
+      +list.map(c=>{
+        const r=recOf(c);
+        const ready=!!(r.provider||r.amount);
+        return '<button class="btn blk" style="justify-content:flex-start;padding:11px 13px" data-a="repGo" data-v="'+v+'|'+esc(c.id)+'">'
+          +'<span class="av s">'+esc(initials(clientName(c)))+'</span>'
+          +'<span style="text-align:left;min-width:0;flex:1"><span class="b7 trunc" style="display:block">'+esc(clientName(c))+'</span>'
+          +'<span class="tiny muted mono">'+esc(c.ref)+'</span></span>'
+          +(ready?'':'<span class="bdg warn">no recommendation yet</span>')+'</button>';
+      }).join('')
+      +'</div></div><div class="m-f"><button class="btn" data-a="close">Cancel</button></div>';
+    openModal(h,1);
+  },
+  async repGo(v){
+    const [key,clientId]=String(v).split('|');
+    const c=getClient(clientId); if(!c) return;
+    const t=(REPORT_TPL||{})[key]; if(!t){ toast('No template','Upload the template first.','warn'); return; }
+    dismissModal();
+    toast('Building the report','Merging '+clientName(c)+'’s details into the template…');
+    try{
+      const res=await fetch('/api/files/'+encodeURIComponent(t.id),{credentials:'same-origin'});
+      if(!res.ok) throw new Error('Could not fetch the template from the server.');
+      const out=await buildReport(await res.blob(),c,key);
+      const nm=reportType(key).name.replace(/[^\w ]+/g,'')+' - '+clientName(c).replace(/[\\/:*?"<>|]/g,'')+'.docx';
+      const u=URL.createObjectURL(out.blob), a=document.createElement('a');
+      a.href=u; a.download=nm; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),2500);
+      S.flow={mode:'repDone',stats:out.stats,key,clientId,name:nm};
+      repResultModal();
+    }catch(e){ toast('Could not build the report',e.message,'risk',9000); }
+  },
+  async repFields(v){
+    const t=(REPORT_TPL||{})[v]; if(!t) return;
+    toast('Reading the template','Checking every merge field…');
+    try{
+      const res=await fetch('/api/files/'+encodeURIComponent(t.id),{credentials:'same-origin'});
+      const entries=readZip(await (await res.blob()).arrayBuffer());
+      const names=new Set();
+      for(const e of entries){
+        if(!/^word\/.*\.xml$/.test(e.name)) continue;
+        const xml=await entryText(e);
+        const re=/MERGEFIELD\s+("?)([^"\\<]+)\1/g; let m;
+        while((m=re.exec(xml))) names.add(m[2].trim());
+      }
+      const headers=(typeof MADS_COLS!=='undefined'&&MADS_COLS.length)?MADS_COLS:Object.keys(MADS_CELLS||{});
+      const resolve=buildFieldResolver(headers);
+      const c=DB.clients.filter(x=>!isPlanOnly(x))[0];
+      const V=c?reportValues(c):{};
+      const rows=[...names].sort().map(f=>{
+        const h=resolve(f);
+        return {f,h,has:h&&V[h]!=null&&V[h]!==''};
+      });
+      const okCount=rows.filter(r=>r.h).length, filled=rows.filter(r=>r.has).length;
+      let html=mHead('Merge fields — '+reportType(v).name,
+        rows.length+' fields · '+okCount+' recognised'+(c?(' · '+filled+' would fill from '+clientName(c)):''));
+      html+='<div class="m-b"><div class="tw" style="max-height:420px;overflow:auto"><table class="t">'
+        +'<thead><tr><th>Field in the template</th><th>Maps to</th><th>Value</th></tr></thead><tbody>'
+        +rows.map(r=>'<tr><td class="mono tiny">'+esc(r.f)+'</td>'
+          +'<td class="'+(r.h?'mu':'')+' tiny">'+(r.h?esc(String(r.h).replace(/[\r\n]+/g,' ')):'<span style="color:var(--risk)">not recognised</span>')+'</td>'
+          +'<td class="tiny">'+(r.has?'<span style="color:var(--ok)">'+esc(String(V[r.h]).slice(0,40))+'</span>':'<span class="muted2">empty</span>')+'</td></tr>').join('')
+        +'</tbody></table></div>'
+        +'<div class="note mut mt"><span class="ic">'+ic('info',15)+'</span><div>“Empty” means the portal has nowhere to '
+        +'get that value for this client yet — usually because the Fact Find or the recommendation is incomplete. '
+        +'Those fields come out blank in the document for you to complete.</div></div></div>'
+        +'<div class="m-f"><button class="btn pri" data-a="close">Close</button></div>';
+      openModal(html,1);
+    }catch(e){ toast('Could not read it',e.message,'risk'); }
+  }
+});
+function repResultModal(){
+  const f=S.flow||{}, st=f.stats||{};
+  const c=getClient(f.clientId);
+  let h=mHead('Report created',f.name||'');
+  h+='<div class="m-b">'
+    +'<div class="note ok"><span class="ic">'+ic('checkc',15)+'</span><div><b>'+st.filled+' fields filled</b> from '
+    +esc(c?clientName(c):'the client')+'’s record'+(st.blank?', '+st.blank+' left blank':'')+'. The document has '
+    +'downloaded — open it in Word and complete anything still empty.</div></div>'
+    +(st.unresolved&&st.unresolved.length
+      ?'<div class="note warn mt"><span class="ic">'+ic('alert',15)+'</span><div><b>'+st.unresolved.length
+        +' field'+(st.unresolved.length===1?'':'s')+' not recognised:</b> '+esc(st.unresolved.slice(0,6).join(', '))
+        +(st.unresolved.length>6?'…':'')+'. Tell me what these should map to and I will add them.</div></div>':'')
+    +'</div><div class="m-f"><button class="btn pri" data-a="close">Done</button></div>';
+  openModal(h);
+}
+/* Reports gets its own place in the rail, under LifePlan */
+const _railHTMLRep=railHTML;
+railHTML=function(){
+  const ready=Object.keys(REPORT_TPL||{}).length;
+  return _railHTMLRep().replace(
+    /(<button class="rail-item[^"]*" data-a="go" data-v="export">)/,
+    '<button class="rail-item'+(S.screen==='reports'?' on':'')+'" data-a="go" data-v="reports">'
+      +ic('file',16)+'<span>Reports</span>'+(ready?'<span class="pc">'+ready+'</span>':'')+'</button>$1');
+};
+const _renderRep=render;
+render=function(){
+  if(S.screen==='reports'){
+    if(REPORT_TPL===null){ loadReportTemplates().then(()=>render()); }
+    $('#root').innerHTML='<div class="shell">'+railHTML()
+      +'<div class="main">'+topHTML()+storageBanner()+'<div class="page">'+screenReports()+'</div></div></div>';
+    if(CHAT_OPEN) chatRender();
+    return;
+  }
+  _renderRep();
+};

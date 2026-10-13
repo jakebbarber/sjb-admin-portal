@@ -1,0 +1,133 @@
+<!doctype html><meta charset="utf-8"><title>multi-provider reader test</title>
+<script>
+window.__runBatch=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const eq=(g,w,l)=>ok(String(g)===String(w),l+' → '+JSON.stringify(g)+(String(g)===String(w)?'':' (wanted '+JSON.stringify(w)+')'));
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+    say('logged in');
+
+    const grab=async n=>new File([await (await ORIG('/'+n)).blob()],n);
+
+    /* A consolidation: three pensions on file, written the way an adviser
+       actually types them — abbreviated, and one with no policy number. */
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-25',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={title:'Mr',firstName:'James',surname:'Whitfield',dob:'1968-06-15',residence:'Spain'};
+    c.data.dcPensions=[
+      {_id:uid('r'),owner:'Applicant 1',name:'Aviva Personal Pension',policyNo:'AV-118822',ccy:'GBP',value:'214000'},
+      {_id:uid('r'),owner:'Applicant 1',name:'Scottish Widows Retirement Account',policyNo:'SW-771203',ccy:'GBP',value:'96500'},
+      {_id:uid('r'),owner:'Applicant 1',name:'Standard Life GPP',ccy:'GBP',value:'48900'}   /* no policy number */
+    ];
+    c.data.recommendation={adviceType:'UK pension transfer (DB & DC)',provider:'Novia Global',
+      product:'International SIPP',ccy:'GBP',amount:'480000'};
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+    S.clientId=c.id; S.screen='client'; S.section='recommendation';
+    const ids=c.data.dcPensions.map(p=>p._id);
+    say('client has '+c.data.dcPensions.length+' pensions on file');
+
+    /* ---- the modal takes several files ---- */
+    ACT.recoRead('');
+    const inp=document.querySelector('#recoFile');
+    ok(!!inp&&inp.multiple,'file input accepts more than one document');
+    ok(!document.querySelector('#recoWho'),'no single-pension picker on the batch route');
+
+    /* ---- feed it four documents at once ---- */
+    const names=['sample_loa.docx','loa_scottish_widows.docx','loa_standard_life.docx','loa_prudential.docx'];
+    const dt=new DataTransfer();
+    for(const n of names) dt.items.add(await grab(n));
+    inp.files=dt.files;
+    await ACT.recoReadGo();
+
+    const f=S.flow||{};
+    eq((f.docs||[]).length,4,'documents read');
+    ok(!(f.failed||[]).length,'none failed to open');
+    say('matching:');
+    (f.docs||[]).forEach(d=>{
+      const p=c.data.dcPensions.find(x=>x._id===d.pid);
+      const hit=d.rows.filter(r=>r.value!=null&&r.value!=='').length;
+      say('  '+d.fileName.padEnd(26)+' → '+(p?p.name:'(new pension)')+'   ['+d.how+']  '+hit+' answers');
+    });
+    const by=n=>(f.docs||[]).find(d=>d.fileName===n);
+    eq(by('sample_loa.docx').pid,ids[0],'  Aviva matched by policy number');
+    ok(/policy number/.test(by('sample_loa.docx').how),'  ...and it says so');
+    eq(by('loa_scottish_widows.docx').pid,ids[1],'  Scottish Widows matched');
+    eq(by('loa_standard_life.docx').pid,ids[2],'  "Standard Life Group Personal Pension Plan" matched "Standard Life GPP" on name');
+    eq(by('loa_prudential.docx').pid,'__new','  Prudential is offered as a new pension');
+    ok((f.docs||[]).every(d=>d.rows.filter(r=>r.value!=null&&r.value!=='').length>=15),
+       '  every document yielded at least 15 answers');
+
+    /* ---- the review modal shows all four, each with its own target ---- */
+    recoResultModal();
+    const mh=(document.querySelector('#modal')||{}).innerHTML||'';
+    eq(document.querySelectorAll('[data-reco-target]').length,4,'  one target picker per document');
+    ok(document.querySelectorAll('details.fblock').length===4,'  one folding block per document');
+    names.forEach(n=>ok(mh.indexOf(n)>=0,'  modal names '+n));
+    ok(mh.indexOf('Add as a new pension')>=0,'  the new-pension option is offered');
+
+    /* ---- clash warning: point two documents at the same pension ---- */
+    document.querySelector('[data-reco-target="1"]').value=ids[0];
+    recoSyncFromDom(); recoResultModal();
+    ok(((document.querySelector('#modal')||{}).innerHTML||'').indexOf('same pension')>=0,
+       '  warns when two documents point at one pension');
+    document.querySelector('[data-reco-target="1"]').value=ids[1];
+    recoSyncFromDom();
+
+    /* ---- apply the lot ---- */
+    ACT.recoApply();
+    const cc=DB.clients.find(x=>x.id===c.id);
+    eq(cc.data.dcPensions.length,4,'a fourth pension was created for Prudential');
+    const P=n=>cc.data.dcPensions.find(p=>(p.name||'').indexOf(n)>=0);
+    say('after applying:');
+    cc.data.dcPensions.forEach(p=>say('  '+String(p.name).padEnd(46)+' '+p.policyNo+'  charges '+p.amc+'%  '
+      +(p.crystallised||'')+' '+(p.crystallisedPct!=null?p.crystallisedPct+'%':'')));
+    eq(P('Aviva').amc,'1.05','  Aviva total charges');
+    eq(P('Scottish Widows').amc,'0.85','  Scottish Widows total charges');
+    eq(P('Standard Life').policyNo,'SL/4471209/A','  Standard Life gained its policy number');
+    ok(/early exit charge/i.test(P('Standard Life').exitFee||''),'  Standard Life exit fee kept the detail');
+    eq(P('Prudential').crystallised,'Partially crystallised','  Prudential crystallisation status');
+    eq(P('Prudential').crystallisedPct,'35','  Prudential % crystallised');
+    eq(P('Prudential').mpaa,'Yes','  Prudential MPAA');
+    ok(/guaranteed annuity rate/i.test(P('Prudential').guarantees||''),'  Prudential guarantee captured');
+    ok(P('Prudential').owner==='Applicant 1','  a created pension gets an owner');
+    /* the adviser-typed name should not be clobbered by the provider's wording */
+    say('  names now: '+cc.data.dcPensions.map(p=>p.name).join(' | '));
+
+    /* ---- all four reach the MADS, in their own columns ---- */
+    const V=madsValues(cc);
+    say('MADS, column by column:');
+    for(let n=1;n<=4;n++){
+      say('  DC '+n+': '+JSON.stringify(V['UK PI DC '+n+' Pension Name'])
+        +'  charges='+V['UK PI DC '+n+' Annual Charges']
+        +'  policy='+JSON.stringify(V['@Reco!'+String.fromCharCode(65+n)+'15'])
+        +'  cryst='+JSON.stringify(V['UK PI DC '+n+' - Crystallised/Uncrystallised']));
+    }
+    ok(Math.abs(V['UK PI DC 2 Annual Charges']-0.0085)<1e-9,'  pension 2 charges land as 0.0085');
+    ok(V['@Reco!D15']==='SL/4471209/A','  pension 3 policy number lands in Reco!D15');
+    ok(Math.abs(V['@Reco!E25']-0.35)<1e-9,'  pension 4 is 35% crystallised in Reco!E25');
+    ok(V['UK PI DC 4 - Crystallised/Uncrystallised']==='Partially crystallised','  pension 4 status');
+
+    /* ---- and the panel shows four cards ---- */
+    render();
+    const cards=[...document.querySelectorAll('.page details.fblock>summary')].map(s=>s.innerText.replace(/\s+/g,' ').trim());
+    say('panel blocks: '+cards.filter(x=>/\d+\/12/.test(x)).join(' | '));
+    ok(cards.filter(x=>/\d+\/12/.test(x)).length===4,'  four ceding-pension cards on the Recommendation screen');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

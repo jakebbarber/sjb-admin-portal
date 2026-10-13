@@ -1,0 +1,455 @@
+/* ===========================================================================
+   PORTAL OVERRIDES — loaded after the shared parts when running on the SJB
+   server. Sign-in, the returned-Fact-Find inbox, real client links, and the
+   parts of the desktop tool that no longer apply.
+   ========================================================================= */
+let INBOX=[], INBOX_T=null;
+CFG.publishedUrl=location.origin;
+CFG.localFile='this portal';
+/* The Fact Find is now a real link, not an attachment. */
+SEND_KINDS.factfind.attach=false;
+SEND_KINDS.factfind.intro='Before we meet, please complete your Fact Find using your personal link below. It takes around 20 minutes, saves as you go, and the last step sends your answers straight to me.';
+function sendLink(c,kind){
+  if(kind==='factfind') return c.formLink||'(press “Get link” first)';
+  const base=(DB.settings.portalBase||location.origin+'/').replace(/\/?$/,'/');
+  return base+SEND_KINDS[kind].path+'/'+encodeURIComponent(c.ref);
+}
+async function ensureFormLink(c){
+  const r=await api('POST','/api/clients/'+encodeURIComponent(c.id)+'/form');
+  c.formLink=r.url; c.formExpires=r.expires;
+  return r;
+}
+
+/* ------------------------------- sign-in -------------------------------- */
+function showLogin(msg){
+  $('#root').innerHTML='<div style="min-height:100dvh;display:grid;place-items:center;padding:20px">'
+    +'<div class="card" style="width:min(420px,100%)"><div class="card-b" style="padding:28px">'
+    +'<div class="row" style="gap:10px;margin-bottom:18px">'+logo(26)+'<span class="b8">SJB Portal</span></div>'
+    +'<h2 style="font-size:20px;margin-bottom:4px">Sign in</h2>'
+    +'<p class="small muted" style="margin-bottom:18px">Staff access only. Choose your portal, then sign in.</p>'
+    +(msg?'<div class="note risk mb" style="background:var(--risk-t);color:var(--risk-ink)"><span class="ic">'+ic('alert',15)+'</span><div>'+esc(msg)+'</div></div>':'')
+    +'<form id="loginForm"><div class="field"><label class="lbl">Email</label><input class="inp" type="email" id="lgEmail" autocomplete="username" required></div>'
+    +'<div class="field"><label class="lbl">Password</label><input class="inp" type="password" id="lgPass" autocomplete="current-password" required></div>'
+    +'<button class="btn pri blk" type="submit" style="margin-top:6px">Sign in</button></form>'
+    +'</div></div></div>';
+  const f=$('#loginForm'); f.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const btn=f.querySelector('button'); btn.disabled=true; btn.textContent='Signing in…';
+    try{
+      await api('POST','/api/login',{email:$('#lgEmail').value,password:$('#lgPass').value});
+      await pullState(); S.screen=S.portal==='admin'?'adminHome':'clients'; render(); startInbox();
+      toast('Welcome back',AUTH_USER&&AUTH_USER.email);
+    }catch(err){ showLogin(err.message||'Could not sign in.'); }
+  });
+  setTimeout(()=>{ const el=$('#lgEmail'); if(el) el.focus(); },30);
+}
+function storageBanner(){
+  if(STORE_OK) return '';
+  return '<div style="background:var(--risk);color:#fff;padding:11px 16px;display:flex;gap:11px;align-items:flex-start;font-size:13px;line-height:1.55">'
+    +'<span style="flex:0 0 17px;margin-top:1px">'+ic('alert',17)+'</span>'
+    +'<div><b>Changes are not reaching the server.</b> '+esc(STORE_MSG||'')+'</div>'
+    +'<button class="btn sm sp" data-a="retrySync" style="background:#fff;border-color:#fff;color:var(--risk);flex:0 0 auto">Retry</button></div>';
+}
+
+/* -------------------------------- inbox --------------------------------- */
+function startInbox(){
+  clearInterval(INBOX_T);
+  INBOX_T=setInterval(pollInbox,30000);
+}
+async function pollInbox(){
+  try{
+    const r=await api('GET','/api/inbox');
+    const known=new Set(INBOX.map(s=>s.id));
+    const fresh=(r.inbox||[]).filter(s=>!known.has(s.id));
+    INBOX=r.inbox||[];
+    if(fresh.length){
+      await pullState();            /* the server has already merged the answers */
+      render();
+      fresh.forEach(s=>s.kind==='kyc'
+        ? toast('KYC details received',s.clientName+' has sent '+(s.summary||[]).join(', ')+'.',null,9000)
+        : toast('Fact Find returned',s.clientName+' has sent their answers.',null,9000));
+    }
+  }catch(e){ /* quiet — the next poll will try again */ }
+}
+/* Two kinds of thing arrive on their own: a returned Fact Find, and anything
+   sent through the KYC link. Each gets its own card so they do not read as the
+   same event — the KYC one also offers the Documents dialog, which is where
+   the uploads themselves live. */
+function inboxCard(list,o){
+  if(!list.length) return '';
+  return '<div class="card mb" style="border-color:'+o.edge+';background:'+o.bg+'"><div class="card-b" style="padding:14px 18px">'
+    +'<div class="row" style="gap:10px;margin-bottom:8px"><span style="color:'+o.ink+'">'+ic(o.icon,18)+'</span>'
+    +'<h3 style="font-size:15px">'+o.title(list.length)+'</h3></div>'
+    +'<div class="stack" style="gap:6px">'+list.map(s=>'<div class="row wrapf" style="gap:8px;font-size:13px">'
+      +'<b>'+esc(s.clientName)+'</b><span class="muted">'+esc(fdt(s.at))+'</span>'
+      +'<span class="muted tiny">'+esc((s.summary||[]).slice(0,4).join(' · '))+(s.summary&&s.summary.length>4?' …':'')+'</span>'
+      +'<span class="sp row" style="gap:6px">'
+      +(o.docs?'<button class="btn xs" data-a="filesFor" data-v="'+esc(s.clientId)+'">Documents</button>':'')
+      +'<button class="btn xs" data-a="open" data-v="'+esc(s.clientId)+'">Open</button>'
+      +'<button class="btn xs ghost" data-a="ack" data-v="'+esc(s.id)+'">Seen</button></span></div>').join('')
+    +'</div></div></div>';
+}
+function inboxBanner(){
+  if(!INBOX.length) return '';
+  const ff=INBOX.filter(s=>s.kind!=='kyc'), kyc=INBOX.filter(s=>s.kind==='kyc');
+  return inboxCard(ff,{edge:'#BFE3D0',bg:'var(--ok-t)',ink:'var(--ok)',icon:'checkc',
+      title:n=>n+' Fact Find'+(n===1?'':'s')+' returned'})
+    +inboxCard(kyc,{edge:'#BBD9F1',bg:'var(--blue-t)',ink:'var(--blue)',icon:'key',docs:1,
+      title:n=>n+' client'+(n===1?' has':'s have')+' sent KYC details'});
+}
+const _screenClients=screenClients;
+screenClients=function(){ const h=_screenClients(); return h.replace('</div>',"</div>"+inboxBanner()); };
+
+/* ------------------------------- actions -------------------------------- */
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(!el.dataset||el.dataset.dp==null||S.screen!=='settings') return;
+  if(!DB.settings) DB.settings={};
+  const d=Object.assign({},DB.settings.dp||{});
+  d[el.dataset.dp]=el.value;
+  d.version=String((Number(d.version)||1));
+  d.updated=new Date().toISOString();
+  DB.settings.dp=d;
+  clearTimeout(document.__dpT);
+  document.__dpT=setTimeout(()=>{ save(); },600);
+});
+Object.assign(ACT,{
+  retrySync(){ STORE_WARNED=false; syncNow(); },
+  async ack(v){ try{ await api('POST','/api/submissions/'+encodeURIComponent(v)+'/ack'); INBOX=INBOX.filter(s=>s.id!==v); render(); }catch(e){ toast('Could not update',e.message,'warn'); } },
+  /* straight from the banner to that client's uploads */
+  filesFor(v){ S.clientId=v; ACT.filesOpen(); },
+  async logout(){ try{ await api('POST','/api/logout'); }catch(e){} AUTH_USER=null; clearInterval(INBOX_T); showLogin(); },
+  /* Sending the Fact Find = get a link from the server, then the usual email draft. */
+  async sendOpen(){
+    const c=getClient(S.clientId); if(!c) return;
+    S.flow={mode:'send',kind:'factfind'};
+    try{ await ensureFormLink(c); }catch(e){ toast('Could not create the link',e.message,'risk'); return; }
+    sendModal();
+  },
+  async sendKind(v){ S.flow={mode:'send',kind:v}; if(v==='factfind'){ const c=getClient(S.clientId); try{ await ensureFormLink(c); }catch(e){} } sendModal(); },
+  async quickSendGo(){
+    const v=S.flow||{};
+    if(!String(v.qsFirst||'').trim()||!String(v.qsSurname||'').trim()||!/@/.test(v.qsEmail||'')){
+      toast('Almost','A first name, surname and a valid email are needed.','warn'); return;
+    }
+    const c=blankClient();
+    c.data.personal.a1={firstName:v.qsFirst.trim(),surname:v.qsSurname.trim(),email:v.qsEmail.trim()};
+    c.status='Awaiting client';
+    DB.clients.unshift(c);
+    try{ await api('PUT','/api/state',{clients:[c]}); SYNCED.clients[c.id]=JSON.stringify(c); }
+    catch(e){ toast('Could not save the client',e.message,'risk'); return; }
+    try{ await ensureFormLink(c); }catch(e){ toast('Could not create the link',e.message,'risk'); return; }
+    dismissModal();
+    S.clientId=c.id; S.screen='client'; S.section='personal'; S.flow={mode:'send',kind:'factfind'};
+    render(); sendModal();
+    logSend(c,'factfind','link');
+  },
+  formDownload(){ toast('Not needed here','On the portal the client gets a link — nothing to download or attach.'); },
+  importOpen(){ toast('Not needed here','Returned Fact Finds arrive by themselves — look for the green banner on the Clients screen.'); },
+  async backup(){ window.location.href='/api/backup'; },
+  restoreOpen(){ toast('Restore','Restoring on the portal is done on the server from a backup file — ask whoever looks after the server.','warn',7000); },
+  wipe(){ toast('Not available','Deleting everything is done on the server, deliberately.','warn'); }
+});
+/* Each adviser's own name and email go on the records they create, so drafts
+   are signed correctly and returned-form notifications reach the right inbox. */
+const _blankClient=blankClient;
+blankClient=function(name){
+  const c=_blankClient(name);
+  if(AUTH_USER){ c.data.meta.adviser=AUTH_USER.name||c.data.meta.adviser; c.data.meta.adviserEmail=AUTH_USER.email; }
+  return c;
+};
+let USERS=[];
+/* Replace the "where this tool lives" card with account + advisers cards. */
+/* A version stamp on the wording, so a consent recorded last year can be told
+   apart from one recorded after the notice changed. Bumped whenever any of
+   the settings below are edited. */
+function dpVersion(){ return String(((DB.settings||{}).dp||{}).version||'1'); }
+function dpBump(){
+  const d=Object.assign({},(DB.settings||{}).dp||{});
+  d.version=String((Number(d.version)||1)+1);
+  d.updated=new Date().toISOString();
+  DB.settings.dp=d;
+}
+function screenDataProtection(){
+  const d=(DB.settings&&DB.settings.dp)||{};
+  const gaps=dpGaps(DB.settings);
+  const F=(id,label,val,hint,wide)=>'<div class="field'+(wide?' full':'')+'"><label class="lbl">'+esc(label)+'</label>'
+    +'<input class="inp" data-dp="'+id+'" value="'+esc(val==null?'':val)+'">'
+    +(hint?'<div class="hint">'+esc(hint)+'</div>':'')+'</div>';
+  let h='<div class="hr"></div><div class="label mb-s">Data protection</div>';
+  h+='<div class="note mut mb"><span class="ic">'+ic('info',15)+'</span><div>These details appear in the privacy '
+    +'notice shown on every link you send a client. They are also what a client is told if they ask who holds '
+    +'their information. <b>The wording is a starting point for your compliance officer to approve, not legal '
+    +'advice.</b></div></div>';
+  if(gaps.length) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div>'
+    +'<b>Not ready to send links yet.</b> Still missing: '+esc(gaps.join(', '))+'. Until these are filled in, '
+    +'the notice tells the client the information is unavailable rather than inventing it.</div></div>';
+  else h+='<div class="note ok mb"><span class="ic">'+ic('checkc',15)+'</span><div>The privacy notice is complete. '
+    +'Version '+esc(dpVersion())+(d.updated?', updated '+esc(fdateS(d.updated)):'')+'.</div></div>';
+  h+='<div class="grid g2">'
+    +F('controller','Legal name of the firm',d.controller,'The entity that decides how client data is used.')
+    +F('email','Email for data protection questions',d.email,'Where a client sends a request about their data.')
+    +F('address','Registered address',d.address,'',1)
+    +F('regulator','Data protection regulator',d.regulator,'For example: the Information Commissioner (ICO), or the CNPD.')
+    +F('icoNumber','Registration number',d.icoNumber,'If the firm is registered with that regulator.')
+    +F('retainYears','Years records are kept after the relationship ends',d.retainYears,'Your own retention policy.')
+    +F('policyUrl','Link to the full privacy policy',d.policyUrl,'',1)
+    +F('joint','Any joint controller',d.joint,'Leave blank unless another firm decides jointly with you how data is used.',1)
+    +'</div>';
+  h+='<div class="row" style="gap:8px;margin-top:10px">'
+    +'<button class="btn" data-a="dpPreview">'+ic('file',14)+' Preview what the client sees</button></div>';
+  return h;
+}
+function dpPreviewModal(){
+  const ff=privacyNotice(DB.settings,'factfind'), kyc=privacyNotice(DB.settings,'kyc');
+  const one=(t,N,consent)=>'<h4 style="margin:14px 0 6px">'+esc(t)+'</h4>'
+    +N.map(x=>'<div style="margin-bottom:9px"><b class="tiny">'+esc(x.h)+'</b>'
+      +'<div class="tiny muted2" style="line-height:1.6">'+esc(x.p)+'</div></div>').join('')
+    +'<div class="note mut"><span class="ic">'+ic('checkc',14)+'</span><div class="tiny">'+esc(consent)+'</div></div>';
+  let h=mHead('What the client is shown','Exactly the wording that appears on your links, built from your settings.');
+  h+='<div class="m-b">'+one('On the Fact Find link',ff,DP_CONSENT.factfind)
+    +'<div class="note mut"><span class="ic">'+ic('checkc',14)+'</span><div class="tiny">'+esc(DP_CONSENT.health)+'</div></div>'
+    +'<div class="hr"></div>'+one('On the KYC / documents link',kyc,DP_CONSENT.kyc)+'</div>'
+    +'<div class="m-f"><button class="btn" data-a="close">Close</button></div>';
+  openModal(h);
+}
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(!el.dataset||el.dataset.dp==null||S.screen!=='settings') return;
+  if(!DB.settings) DB.settings={};
+  const d=Object.assign({},DB.settings.dp||{});
+  d[el.dataset.dp]=el.value;
+  d.version=String((Number(d.version)||1));
+  d.updated=new Date().toISOString();
+  DB.settings.dp=d;
+  clearTimeout(document.__dpT);
+  document.__dpT=setTimeout(()=>{ save(); },600);
+});
+Object.assign(ACT,{
+  dpPreview(){ dpPreviewModal(); },
+  /* Everything held about one person, as a file to send them. */
+  async dpExport(){
+    const c=getClient(S.clientId); if(!c) return;
+    try{
+      const r=await api('GET','/api/clients/'+encodeURIComponent(c.id)+'/data');
+      const b=new Blob([JSON.stringify(r,null,2)],{type:'application/json'});
+      const u=URL.createObjectURL(b), a=document.createElement('a');
+      a.href=u; a.download=c.ref+' - everything we hold.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),1500);
+      toast('Exported','Everything held about '+clientName(c)+', including their documents and links.');
+    }catch(e){ toast('Could not export',e.message,'warn'); }
+  },
+  /* Erasure. Names what will go, and makes them type the reference \u2014
+     this cannot be undone and it removes their ID documents too. */
+  dpErase(){
+    const c=getClient(S.clientId); if(!c) return;
+    let h=mHead('Erase '+clientName(c),'Deletes everything about this person, permanently.');
+    h+='<div class="m-b">'
+      +'<div class="note risk mb"><span class="ic">'+ic('alert',15)+'</span><div>This removes their record, '
+      +'every document they uploaded (passport, proof of address, bank statement), every Fact Find they returned, '
+      +'and any links that are still live. It cannot be undone.</div></div>'
+      +'<div class="note mut mb"><span class="ic">'+ic('info',15)+'</span><div>Check first whether you are '
+      +'required to keep any of it \u2014 anti-money-laundering records usually have to be kept for a period '
+      +'even after someone asks to be forgotten. Export a copy first if you need one.</div></div>'
+      +'<div class="field"><label class="lbl">Type the reference <b>'+esc(c.ref)+'</b> to confirm</label>'
+      +'<input class="inp mono" id="eraseRef" autocomplete="off"></div></div>'
+      +'<div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+      +'<button class="btn" data-a="dpExport">'+ic('dl',14)+' Export first</button>'
+      +'<button class="btn pri danger" data-a="dpEraseGo">Erase permanently</button></div>';
+    openModal(h);
+  },
+  async dpEraseGo(){
+    const c=getClient(S.clientId); if(!c) return;
+    const typed=(($('#eraseRef')||{}).value||'').trim();
+    if(typed!==c.ref){ toast('Reference does not match','Type '+c.ref+' exactly to confirm.','warn'); return; }
+    const name=clientName(c);
+    try{
+      const r=await api('DELETE','/api/clients/'+encodeURIComponent(c.id));
+      const g=r.erased||{};
+      const i=DB.clients.findIndex(x=>x.id===c.id);
+      if(i>-1) DB.clients.splice(i,1);
+      SYNCED&&SYNCED.clients&&delete SYNCED.clients[c.id];
+      dismissModal(); S.screen='clients'; S.clientId=null; render();
+      toast('Erased',name+' is gone: '+(g.files||0)+' document'+((g.files||0)===1?'':'s')+', '
+        +(g.submissions||0)+' submission'+((g.submissions||0)===1?'':'s')+' and '
+        +((g.formLinks||0)+(g.docLinks||0))+' link'+(((g.formLinks||0)+(g.docLinks||0))===1?'':'s')+'.',null,9000);
+    }catch(e){ toast('Could not erase',e.message,'warn'); }
+  }
+});
+const _screenSettings=screenSettings;
+screenSettings=function(){
+  let h=_screenSettings();
+  const cut=h.indexOf('<div class="card mt" style="max-width:620px"><div class="card-h">');
+  if(cut>0) h=h.slice(0,cut);
+  h+='<div class="card mt" style="max-width:620px"><div class="card-h"><span style="color:var(--blue)">'+ic('user',18)+'</span>'
+    +'<div><h3>Your account</h3><div class="sub">'+esc(AUTH_USER?AUTH_USER.email:'')+'</div></div>'
+    +'<button class="btn sm sp" data-a="logout">Sign out</button></div>'
+    +'<div class="card-b">'
+    +'<form id="profForm"><div class="grid g2">'
+    +'<div class="field"><label class="lbl">Your name (as signed on emails)</label><input class="inp" id="prName" value="'+esc(AUTH_USER?AUTH_USER.name:'')+'"></div>'
+    +'<div class="field"><label class="lbl">Your telephone</label><input class="inp" id="prPhone" value="'+esc(AUTH_USER?AUTH_USER.phone||'':'')+'"></div></div>'
+    +'<button class="btn" type="submit">Save</button></form>'
+    +'<div class="hr"></div>'
+    +'<form id="pwForm"><div class="grid g2">'
+    +'<div class="field"><label class="lbl">Current password</label><input class="inp" type="password" id="pwCur" autocomplete="current-password"></div>'
+    +'<div class="field"><label class="lbl">New password (10+ characters)</label><input class="inp" type="password" id="pwNew" autocomplete="new-password"></div></div>'
+    +'<button class="btn" type="submit">Change password</button></form></div></div>';
+  if(AUTH_USER&&AUTH_USER.admin) h+='<div class="card mt" style="max-width:620px"><div class="card-b">'
+    +screenDataProtection()+'</div></div>';
+  if(!(AUTH_USER&&AUTH_USER.admin)){
+    h+='<div class="note mut mt" style="max-width:620px"><span class="ic">'+ic('shield',15)+'</span><div>You see only the clients you '
+      +'create. Other advisers on this portal each have their own book, and the practice admin manages logins.</div></div>';
+    return h;
+  }
+  h+='<div class="card mt" style="max-width:620px"><div class="card-h"><span style="color:var(--orange)">'+ic('users',18)+'</span>'
+    +'<div><h3>Advisers</h3><div class="sub">Same portal link for everyone; each adviser sees only their own clients.</div></div>'
+    +'<span class="bdg or sp">admin</span></div>'
+    +'<div class="card-b">'
+    +(USERS.length?'<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Email</th><th>Last sign-in</th><th></th></tr></thead><tbody>'
+      +USERS.map(u=>'<tr><td class="nm">'+esc(u.name)+'</td><td class="mu">'+esc(u.email)+'</td><td class="mu tiny">'+esc(u.lastLogin?fdt(u.lastLogin):'never')+'</td>'
+        +'<td class="r">'+(AUTH_USER&&u.id===AUTH_USER.id?'<span class="bdg info">you</span>'
+          :'<button class="btn xs'+(u.disabled?' pri':' ghost danger')+'" data-a="userToggle" data-v="'+esc(u.id)+'" data-on="'+(u.disabled?'enable':'disable')+'">'+(u.disabled?'Re-enable':'Disable')+'</button>')+'</td></tr>').join('')
+      +'</tbody></table></div>':'<div class="small muted">Loading…</div>')
+    +'<div class="hr"></div><div class="label mb-s">Add an adviser</div>'
+    +'<form id="addUserForm"><div class="grid g3">'
+    +'<div class="field"><label class="lbl">Name</label><input class="inp" id="nuName" required></div>'
+    +'<div class="field"><label class="lbl">Email</label><input class="inp" id="nuEmail" type="email" required></div>'
+    +'<div class="field"><label class="lbl">First password (10+)</label><input class="inp" id="nuPass" type="text" required minlength="10"></div></div>'
+    +'<div class="row" style="gap:10px"><button class="btn pri" type="submit">'+ic('plus',14)+' Add adviser</button>'
+    +'<span class="tiny muted">Give them the portal link, their email and this first password. They can change it under Settings.</span></div></form>'
+    +'</div></div>';
+  setTimeout(()=>{
+    const pf=$('#profForm'); if(pf) pf.addEventListener('submit',async e=>{ e.preventDefault();
+      try{ const r=await api('POST','/api/profile',{name:$('#prName').value,phone:$('#prPhone').value}); AUTH_USER=Object.assign(AUTH_USER||{},r.user); toast('Saved'); }
+      catch(err){ toast('Not saved',err.message,'warn'); } });
+    const f=$('#pwForm'); if(f) f.addEventListener('submit',async e=>{ e.preventDefault();
+      try{ await api('POST','/api/password',{current:$('#pwCur').value,next:$('#pwNew').value}); toast('Password changed'); $('#pwCur').value=''; $('#pwNew').value=''; }
+      catch(err){ toast('Not changed',err.message,'warn'); } });
+    const af=$('#addUserForm'); if(af) af.addEventListener('submit',async e=>{ e.preventDefault();
+      try{ await api('POST','/api/users',{name:$('#nuName').value,email:$('#nuEmail').value,password:$('#nuPass').value});
+        toast('Adviser added',$('#nuEmail').value+' can now sign in.'); await loadUsers(); render(); }
+      catch(err){ toast('Not added',err.message,'warn',7000); } });
+    if(!USERS.length) loadUsers().then(()=>{ if(S.screen==='settings') render(); });
+  },0);
+  return h;
+};
+async function loadUsers(){ try{ USERS=(await api('GET','/api/users')).users||[]; }catch(e){ USERS=[]; } }
+ACT.userToggle=async function(v,el){
+  try{ await api('POST','/api/users/'+encodeURIComponent(v)+'/'+el.dataset.on); await loadUsers(); render(); toast(el.dataset.on==='disable'?'Login disabled':'Login re-enabled'); }
+  catch(e){ toast('Could not change that',e.message,'warn'); }
+};
+
+/* --------------------- documents: request + view ------------------------ */
+const DOC_REQ_TEXT=[
+  'The ID requirements are as follows — please could you kindly send these at your next convenience so we can complete AML checks at our end:',
+  '',
+  '1. A photo of your UK passport. Please make sure to include the signature page, which must be signed.',
+  '2. A photo of you holding your UK passport next to your face for identity verification. Please make sure the passport is clear and visible.',
+  '3. Proof of address for your current overseas residence. This must be a recent utility bill dated within the last six weeks.',
+  '4. Proof of bank. Please provide your UK bank statement dated within the last six weeks.',
+  '5. Your local Tax Identification Number.',
+  '6. Pension beneficiary details: full name, relationship, date of birth, telephone number, email and residential address, and % of entitlement.'
+].join('\n');
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(!el.dataset||el.dataset.dp==null||S.screen!=='settings') return;
+  if(!DB.settings) DB.settings={};
+  const d=Object.assign({},DB.settings.dp||{});
+  d[el.dataset.dp]=el.value;
+  d.version=String((Number(d.version)||1));
+  d.updated=new Date().toISOString();
+  DB.settings.dp=d;
+  clearTimeout(document.__dpT);
+  document.__dpT=setTimeout(()=>{ save(); },600);
+});
+Object.assign(ACT,{
+  async docsOpen(){
+    const c=getClient(S.clientId); if(!c) return;
+    let r;
+    try{ r=await api('POST','/api/clients/'+encodeURIComponent(c.id)+'/docs'); }
+    catch(e){ toast('Could not create the link',e.message,'risk'); return; }
+    const a=(c.data.personal||{}).a1||{};
+    const body='Dear '+(a.firstName||'client')+',\n\n'+DOC_REQ_TEXT
+      +'\n\nEverything can be uploaded securely at your personal link:\n\n'+r.url
+      +'\n\nThank you, and please let me know if you have any questions or concerns.\n\nKind regards\n'
+      +(AUTH_USER&&AUTH_USER.name||'')+'\n'+CFG.org;
+    logSend(c,'idcheck','link');
+    openMail(primaryEmail(c),'Your documents — '+CFG.org,body,DB.settings.ccEmail);
+    if(!window.claude) toast('Draft opened','The document request with their upload link is ready to send.');
+  },
+  async filesOpen(){
+    const c=getClient(S.clientId); if(!c) return;
+    let files=[], link='';
+    try{ files=(await api('GET','/api/clients/'+encodeURIComponent(c.id)+'/files')).files||[]; }catch(e){}
+    try{ link=(await api('POST','/api/clients/'+encodeURIComponent(c.id)+'/docs')).url; }catch(e){}
+    let h=mHead('Documents — '+clientName(c),files.length?(files.length+' file'+(files.length===1?'':'s')+' received'):'Nothing uploaded yet.');
+    h+='<div class="m-b">';
+    if(files.length){
+      h+='<div class="stack">'+files.map(f=>'<div class="row" style="gap:8px;padding:10px 12px;border:1px solid var(--line);border-radius:10px">'
+        +'<div style="flex:1;min-width:0"><div class="b7 trunc">'+esc(f.label)+'</div>'
+        +'<div class="tiny muted trunc">'+esc(f.name)+' · '+Math.round(f.size/1024)+' KB · '+esc(fdt(f.at))+'</div></div>'
+        +'<a class="btn xs" href="/api/files/'+esc(f.id)+'">'+ic('dl',13)+' Download</a>'
+        +'<button class="btn xs ghost danger" data-a="fileDel" data-v="'+esc(f.id)+'">'+ic('trash',13)+'</button>'
+        +'</div>').join('')+'</div>';
+    } else h+='<div class="note mut"><span class="ic">'+ic('info',15)+'</span><div>When the client uploads through their link, the files appear here and a notice appears on your Clients screen.</div></div>';
+    if(link) h+='<div class="field mt"><label class="lbl">Their upload link</label>'
+      +'<div class="row" style="gap:7px"><input class="inp mono" readonly value="'+esc(link)+'">'
+      +'<button class="btn sm" data-a="hCopyLink" data-v="'+esc(link)+'">'+ic('copy',14)+'</button></div></div>';
+    h+='</div><div class="m-f"><button class="btn" data-a="close">Close</button>'
+      +'<button class="btn pri" data-a="docsOpen">'+ic('send',14)+' Send document request</button></div>';
+    openModal(h);
+  },
+  hCopyLink(v){ copyText(v,'The link'); },
+  async fileDel(v){
+    try{ await api('DELETE','/api/files/'+encodeURIComponent(v)); toast('Deleted','The file has been removed.'); ACT.filesOpen(); }
+    catch(e){ toast('Could not delete',e.message,'warn'); }
+  }
+});
+/* extra per-client buttons that only exist on the portal */
+const _screenClient=screenClient;
+screenClient=function(){
+  let h=_screenClient();
+  h=h.replace('<button class="btn sm" data-a="dlClient"',
+    '<button class="btn sm" data-a="filesOpen">'+ic('key',14)+' Documents</button>'
+    +'<button class="btn sm" data-a="clientReport">'+ic('file',14)+' Create report'+ic('chevD',13)+'</button>'
+    +'<button class="btn sm" data-a="dpExport" title="Everything held about this person, as a file">'
+      +ic('shield',14)+' Their data</button>'
+    +'<button class="btn sm danger" data-a="dpErase" title="Erase this person entirely">'+ic('trash',14)+' Erase</button>'
+    +'<button class="btn sm" data-a="dlClient"');
+  /* What they agreed to, and when — the evidence a regulator would ask for. */
+  const c=getClient(S.clientId);
+  if(c&&c.consent){
+    const k=c.consent;
+    const line='<div class="note mut mb" style="max-width:900px"><span class="ic">'+ic('shield',15)+'</span>'
+      +'<div><b>Consent recorded '+esc(fdateS(k.agreedAt))+'</b>'
+      +(k.version?' · notice version '+esc(k.version):'')
+      +(k.via?' · via the '+esc(k.via):'')
+      +'<div class="tiny muted2" style="margin-top:3px">'+esc(k.wording||'')+'</div>'
+      +(k.health?('<div class="tiny" style="margin-top:4px">Health information: <b>'
+        +(k.health.given?'agreed':'not agreed — do not rely on it')+'</b></div>'):'')
+      +'</div></div>';
+    h=h.replace('<div class="page">','<div class="page">'+line);
+    if(h.indexOf(line)<0) h=line+h;   /* whichever shell we are in */
+  }
+  return h;
+};
+
+/* --------------------------------- boot --------------------------------- */
+function boot(){
+  window.addEventListener('error',ev=>{ console.error(ev.error||ev.message);
+    toast('Something went wrong',(ev.message||'Unexpected error'),'risk',8000); });
+  window.addEventListener('beforeunload',()=>{ if(SAVE_T) syncNow(); });
+  const mq=document.createElement('style');
+  mq.textContent='@media(max-width:900px){.ffgrid{grid-template-columns:1fr!important}.ffgrid>.card:first-child{position:static!important}.top button[data-a="go"][data-v="clients"]{display:inline-flex!important}}';
+  document.head.appendChild(mq);
+  (async()=>{
+    try{
+      await pullState();
+      /* deep link from a notification email: /#client=ID */
+      const m=/client=([A-Za-z0-9_-]+)/.exec(location.hash);
+      if(m&&getClient(m[1])){ S.clientId=m[1]; S.screen='client'; S.section='personal'; }
+      render(); startInbox();
+    }catch(e){ showLogin(e.auth?'':e.message); }
+  })();
+}

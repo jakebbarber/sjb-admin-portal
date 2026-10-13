@@ -1,0 +1,371 @@
+/* ===========================================================================
+   LIFEPLAN (its own section) · IMPORT AN EXISTING MADS
+   A LifePlan is just a client record carrying a cashflow. A standalone plan —
+   for a prospect, or a "what if" — is the same record with planOnly set, so
+   every piece of cashflow machinery works on it unchanged and it can be turned
+   into a real client later without re-keying anything.
+   ========================================================================= */
+function isPlanOnly(c){ return !!c.planOnly; }
+function hasPlan(c){ return !!(c.cashflow&&Object.keys(c.cashflow).length); }
+
+/* keep standalone plans out of the client list */
+const _screenClientsL=screenClients;
+screenClients=function(){
+  const all=DB.clients;
+  DB.clients=all.filter(c=>!isPlanOnly(c));
+  let h;
+  try{ h=_screenClientsL(); } finally { DB.clients=all; }
+  return h.replace('<button class="btn" data-a="importOpen">',
+    '<button class="btn" data-a="madsImportOpen">'+ic('up',15)+' Import a MADS</button>'
+    +'<button class="btn" data-a="importOpen">');
+};
+
+function screenLifeplan(){
+  /* every client can have a forecast, so they all belong here — the badge says
+     whether the assumptions have actually been worked on yet. */
+  const plans=DB.clients.slice().sort((a,b)=>(b.updated||'').localeCompare(a.updated||''));
+  let h='<div class="ph"><div><h1>LifePlan</h1>'
+    +'<div class="sub">Cashflow forecasts. Linked to a client, or standalone for a prospect or a “what if”.</div></div>'
+    +'<div class="sp row" style="gap:8px">'
+    +'<button class="btn" data-a="planNew">'+ic('plus',15)+' New standalone plan</button>'
+    +'<button class="btn pri" data-a="planFromClient">'+ic('users',15)+' Plan for a client</button></div></div>';
+  if(!plans.length){
+    return h+'<div class="card"><div class="empty"><div class="ei">'+ic('chart',24)+'</div>'
+      +'<h4>No plans yet</h4><p>Build a forecast for an existing client, or start a standalone plan for someone '
+      +'who is not on the books yet. A standalone plan can be turned into a full client at any point.</p>'
+      +'<div class="row" style="justify-content:center;margin-top:14px;gap:8px">'
+      +'<button class="btn pri" data-a="planFromClient">Plan for a client</button>'
+      +'<button class="btn" data-a="planNew">New standalone plan</button></div></div></div>';
+  }
+  h+='<div class="card"><div class="tw"><table class="t"><thead><tr>'
+    +'<th>Plan</th><th>Type</th><th class="r">Savings today</th><th class="r">At retirement</th>'
+    +'<th>Outcome</th><th>Updated</th><th style="width:40px"></th></tr></thead><tbody>';
+  plans.forEach(c=>{
+    let res=null; try{ res=cfRun(c,cfSettings(c),false); }catch(e){}
+    const base=cfBase(c);
+    h+='<tr class="clk" data-a="planOpen" data-v="'+esc(c.id)+'">'
+      +'<td><div class="row" style="gap:9px"><span class="av s">'+esc(initials(clientName(c)))+'</span>'
+      +'<div style="min-width:0"><div class="nm trunc">'+esc(clientName(c))+'</div>'
+      +'<div class="tiny mu mono">'+esc(c.ref)+'</div></div></div></td>'
+      +'<td>'+(isPlanOnly(c)?'<span class="bdg mut">standalone</span>'
+        :hasPlan(c)?'<span class="bdg info">client · worked on</span>':'<span class="bdg mut">client</span>')+'</td>'
+      +'<td class="r b7">'+(res?money(res.startTotal,base):'—')+'</td>'
+      +'<td class="r">'+(res?money(res.atRetirement,base):'—')+'</td>'
+      +'<td>'+(res?(res.shortfallYear
+        ?'<span class="bdg risk"><span class="dot"></span>runs out '+res.shortfallYear+'</span>'
+        :'<span class="bdg ok"><span class="dot"></span>lasts</span>'):'<span class="muted2">—</span>')+'</td>'
+      +'<td class="mu tiny">'+esc(fdateS(c.updated))+'</td>'
+      +'<td class="muted2">'+ic('chev',15)+'</td></tr>';
+  });
+  h+='</tbody></table></div></div>';
+  return h;
+}
+
+/* --------------------------- MADS import -------------------------------- */
+/* Reads the workbook the adviser already has and creates a client from it,
+   using the same Template-sheet wiring the writer uses — so whatever version
+   of the MADS they are on, the fields are found where that version keeps them. */
+function xlCellValue(cellEl,strings){
+  const t=cellEl.getAttribute('t');
+  if(t==='inlineStr'){ return Array.from(cellEl.getElementsByTagName('t')).map(x=>x.textContent).join(''); }
+  const v=cellEl.getElementsByTagName('v')[0];
+  if(!v) return '';
+  if(t==='s') return strings[+v.textContent]||'';
+  if(t==='e') return '';
+  return v.textContent;
+}
+function readSheetCells(xml,strings){
+  const doc=new DOMParser().parseFromString(xml,'application/xml');
+  const out={};
+  Array.from(doc.getElementsByTagName('c')).forEach(c=>{
+    const r=c.getAttribute('r'); if(!r) return;
+    const val=xlCellValue(c,strings);
+    if(val!=='') out[r]=val;
+  });
+  return out;
+}
+const XL_EPOCH=Date.UTC(1899,11,30);
+function fromSerial(v){
+  const n=Number(v); if(!isFinite(n)||n<=0||n>60000) return null;
+  const d=new Date(XL_EPOCH+n*86400000);
+  return d.getUTCFullYear()+'-'+d2(d.getUTCMonth()+1)+'-'+d2(d.getUTCDate());
+}
+const MI_OWNER={'APPLICANT 1':'Applicant 1','APPLICANT 2':'Applicant 2','JOINT':'Joint'};
+function miOwner(v){ return MI_OWNER[String(v||'').toUpperCase()]||v||''; }
+function miDate(v){ return fromSerial(v)||(/^\d{4}-\d{2}-\d{2}$/.test(String(v))?String(v):''); }
+
+/* MADS Template header  ->  where it belongs in the Fact Find */
+const MADS_IMPORT=[
+  ['Date of Fact Find',           'meta.ffDate',        miDate],
+  ['CURRENCY OF FACT FIND',       'meta.ffCurrency'],
+  ['Adviser Name',                'meta.adviser'],
+  ['Lead Source Entry',           'meta.introducer'],
+  ['Title',                       'personal.a1.title'],
+  ['First Name',                  'personal.a1.firstName'],
+  ['Surname',                     'personal.a1.surname'],
+  ['Date of birth',               'personal.a1.dob',    miDate],
+  ['Mobile Number',               'personal.a1.mobile'],
+  ['Email Address',               'personal.a1.email'],
+  ['NI Number',                   'personal.a1.nino'],
+  ['Country of tax resident',     'personal.a1.taxResidence'],
+  ['Client Nationality',          'personal.a1.nationality'],
+  ['Place of birth',              'personal.a1.birthCountry'],
+  ['State of health',             'personal.a1.health'],
+  ['Smoker/non-smoker',           'personal.a1.smoker'],
+  ['Marital status',              'personal.a1.marital'],
+  ["Partner's Title",             'personal.a2.title'],
+  ["Partner's first name",        'personal.a2.firstName'],
+  ['Spouse surname',              'personal.a2.surname'],
+  ["Partner's DOB",               'personal.a2.dob',    miDate],
+  ["Partner's Mobile",            'personal.a2.mobile'],
+  ["Partner's Personal Email Address ",'personal.a2.email'],
+  ["Partner's Country of tax residence",'personal.a2.taxResidence'],
+  ['Partners Nationality',        'personal.a2.nationality'],
+  ["Partner's State of health",   'personal.a2.health'],
+  ["Partner's Smoker/non-smoker status",'personal.a2.smoker'],
+  ['Job Title (Occupations)',     'employment.a1.occupation'],
+  ['Name of Employer',            'employment.a1.employer'],
+  ['Status',                      'employment.a1.status'],
+  ['Gross Annual salary',         'employment.a1.salary'],
+  ['Client Gross Annual Salary Currency','employment.a1.salaryCcy'],
+  ["Partner's Job Title (Occupation)",'employment.a2.occupation'],
+  ["Partner's Name of Employer / Company",'employment.a2.employer'],
+  ["Partner's Work Status",       'employment.a2.status'],
+  ['Where will you retire',       'retirement.a1.retireCountry'],
+  ['Retirement Age',              'retirement.a1.retireAge'],
+  ['Desired Net Retirement Income Currency','retirement.a1.incomeCcy'],
+  ['Desired Net Retirement Income','retirement.a1.desiredIncome'],
+  ['Who does the Desired Net Retirement Income cover?','retirement.a1.covers'],
+  ['Address Line 1',              '_addr.line1'],
+  ['Address Line 2',              '_addr.city'],
+  ['Address Line 3',              '_addr.postcode'],
+  ['Address Line 4',              '_addr.country'],
+  ['RPQ ATR Result',              'risk.a1.atrScore'],
+  ['RPQ Please state risk profile the client wishes to choose','risk.a1.atrChosen'],
+  ['RPQ What is your chosen investment objective?','risk.a1.objective'],
+  ['RPQ What is your maximum ability to bear loss?','risk.a1.capacity'],
+  ['RPQ 7. How long do you like to invest for?','risk.a1.horizon'],
+  ['RPQ 2. How many years of investment experience do you have?','risk.a1.experience'],
+  ['RPQ Are you intending to withdraw income from this portfolio?','risk.a1.withdrawIncome'],
+  ["APPS OUT 1 Client Cat - Are you a Politically Exposed Person ('PEP')?",'kyc.a1.pep'],
+  ['APPS OUT 1 - Source of Wealth','kyc.a1.sow'],
+  ['APPS OUT 1 - Source of funds','kyc.a1.sof'],
+  ['APPS OUT 1 - How was the business conducted','kyc.a1.method'],
+  ['APPS OUT 1 DD - Whats your Tax Identification Number? (TIN)','personal.a1.tin'],
+  ['Expenditure Joint Total Annual Expenditure (individual not joint)','incomeExp.expTotal'],
+  ['Expenditure Individual Total Annual Expenditure (individual not joint)','incomeExp.expTotal'],
+  ['Expenditure Joint Annual Mortgages','incomeExp.expMortgage'],
+  ['Expenditure Individual Annual Mortgages','incomeExp.expMortgage'],
+  ['Expenditure Joint Loans',     'incomeExp.expLoans'],
+  ['Expenditure Individual Loans','incomeExp.expLoans'],
+  ['Expenditure Joint Credit cards','incomeExp.expCards'],
+  ['Expenditure Individual Credit cards','incomeExp.expCards']
+];
+/* repeating blocks: [section, n, {field: headerTemplate}] — %n% is the index */
+const MADS_IMPORT_SERIES=[
+  ['dependants',10,{name:'Child %n% Name',dob:'Child %n% date of birth'},{dob:miDate}],
+  ['cash',10,{owner:'Bank %n% Owner',bank:'Bank %n% Name',type:'Bank %n% Account Type',
+    location:'Bank %n% Location',amount:'Bank %n% Amount',ccy:'Cash currency %n%'},{owner:miOwner}],
+  ['investments',10,{owner:'Investment %n% Owner ',provider:'Investment %n% Provider ',
+    type:'Investment %n% Type',location:'Investment %n% Location',value:'Investment %n% Amount',
+    ccy:'Investment currency %n%'},{owner:miOwner}],
+  ['dcPensions',10,{owner:'Additional Pension %n% Owner ',name:'Additional Pension %n%',
+    type:'Additional Pension %n%  Type',nmpa:'Additional Pension %n% Normal Retirement Age',
+    employerContrib:'Additional Pension %n% Employer Contributions (Annual)',
+    personalContrib:'Additional Pension %n% Personal Contributions (Annual)',
+    value:'Additional Pension %n% Current Value'},{owner:miOwner}],
+  ['statePensions',10,{owner:'State Pension %n% Owner ',country:'State Pension %n% Country of State Pension',
+    years:'State Pension %n% Years of contributions',spa:'State Pension %n% Age',
+    amount:'State Pension %n% Estimated Amount today'},{owner:miOwner}],
+  ['liabilities',10,{owner:'Loan %n% Owner',type:'Loan %n% Type',balance:'Loan %n% Amount',
+    monthly:'Loan %n% Monthly Premiums',term:'Loan %n% Term',ccy:'Loan Currency %n%'},{owner:miOwner}],
+  ['protection',7,{owner:'Life Insurance %n% Owner',provider:'Life Insurance %n% Name',
+    sumAssured:'Life Insurance %n% Insured Amount',premium:'Life Insurance %n% Monthly  Premiums'},{owner:miOwner}],
+  ['beneficiaries',4,{name:'APPS OUT 1 Beneficiary - Full Name %n%',
+    relationship:'APPS OUT 1 Beneficiary - Relationship %n%',dob:'APPS OUT 1 Beneficiary - Date of Birth %n%',
+    phone:'APPS OUT 1 Beneficiary - Telephone Number %n%',email:'APPS OUT 1 Beneficiary - Email %n%',
+    address:'APPS OUT 1 Beneficiary - Residential Address %n%',
+    pct:'APPS OUT 1 Beneficiary - Total Percentage of Benefit %n%'},{dob:miDate}]
+];
+/* the first property lives in the "Residence" block, the rest are numbered */
+const MADS_IMPORT_PROPERTY={
+  first:{owner:'Owner Main Residence',location:'Main Residence location',purchased:'Residence Purchase date',
+    purchasePrice:'Residence Purchase price',value:'Residence Current value',mortgage:'Residence Mortgage outstanding',
+    mortgageType:'Residence Repayment or interest only',term:'Residence Term left',
+    monthly:'Residence Monthly repayment cost',rental:'Residence Monthly Rental Income',ccy:'Property Currency 1'},
+  rest:{owner:'Property %n% Owner 2',location:'Property %n% location',purchased:'Property %n% Purchase date',
+    purchasePrice:'Property %n% Purchase price',value:'Property %n% Current value',
+    mortgage:'Property %n% Mortgage outstanding',mortgageType:'Property %n% Repayment or interest only',
+    term:'Property %n% Term left',monthly:'Property %n% Monthly repayment cost',
+    rental:'Property %n% Rental Income',ccy:'Property Currency %n%'}
+};
+
+async function madsToClient(file){
+  const entries=readZip(await file.arrayBuffer());
+  const find=n=>entries.find(e=>e.name===n);
+  const wbE=find('xl/workbook.xml'), relE=find('xl/_rels/workbook.xml.rels');
+  if(!wbE||!relE) throw new Error('That does not look like an Excel workbook.');
+  const paths=sheetPaths(await entryText(wbE),await entryText(relE));
+  const dyn=await extractTemplateMap(find,paths);
+  if(!dyn) throw new Error('This workbook has no readable Template sheet, so I cannot tell where its fields live.');
+  const ssE=find('xl/sharedStrings.xml');
+  const strings=ssE?sharedStringsOf(await entryText(ssE)):[];
+  /* read every sheet the map points at, once */
+  const sheetCells={};
+  for(const key of Object.keys(dyn.map)){
+    const sheet=dyn.map[key][0];
+    if(sheetCells[sheet]) continue;
+    const p=paths[sheet]; if(!p){ sheetCells[sheet]={}; continue; }
+    const e=find(p); sheetCells[sheet]=e?readSheetCells(await entryText(e),strings):{};
+  }
+  const get=(header)=>{
+    const t=dyn.map[normHeader(header)]; if(!t) return '';
+    return (sheetCells[t[0]]||{})[t[1]]||'';
+  };
+  const c=blankClient();
+  const setPath=(path,val)=>{
+    if(val==null||String(val).trim()==='') return 0;
+    const p=path.split('.');
+    if(p[0]==='_addr') return 0;
+    let o=c.data;
+    for(let i=0;i<p.length-1;i++){ o[p[i]]=o[p[i]]||{}; o=o[p[i]]; }
+    o[p[p.length-1]]=String(val).trim(); return 1;
+  };
+  let n=0;
+  const addr={};
+  MADS_IMPORT.forEach(([header,path,conv])=>{
+    let v=get(header); if(v==='') return;
+    if(conv) v=conv(v);
+    if(v==='') return;
+    if(path.indexOf('_addr.')===0){ addr[path.slice(6)]=String(v).trim(); n++; return; }
+    n+=setPath(path,v);
+  });
+  if(Object.keys(addr).length){ addr._id=uid('r'); addr.owner='Both'; c.data.addresses=[addr]; }
+  MADS_IMPORT_SERIES.forEach(([sec,max,fields,convs])=>{
+    const rows=[];
+    for(let i=1;i<=max;i++){
+      const row={_id:uid('r')}; let any=false;
+      Object.keys(fields).forEach(f=>{
+        let v=get(fields[f].split('%n%').join(i)); if(v==='') return;
+        if(convs&&convs[f]) v=convs[f](v);
+        if(v===''||v==null) return;
+        row[f]=String(v).trim(); any=true;
+      });
+      if(any){ rows.push(row); n++; }
+    }
+    if(rows.length) c.data[sec]=rows;
+  });
+  /* property */
+  const props=[];
+  const readProp=(tpl,i)=>{
+    const row={_id:uid('r')}; let any=false;
+    Object.keys(tpl).forEach(f=>{
+      let v=get(tpl[f].split('%n%').join(i)); if(v==='') return;
+      if(f==='owner') v=miOwner(v);
+      row[f]=String(v).trim(); any=true;
+    });
+    return any?row:null;
+  };
+  const first=readProp(MADS_IMPORT_PROPERTY.first,1);
+  if(first){ first.type='Main residence'; props.push(first); n++; }
+  for(let i=2;i<=10;i++){ const p=readProp(MADS_IMPORT_PROPERTY.rest,i); if(p){ props.push(p); n++; } }
+  if(props.length) c.data.properties=props;
+  c.name=clientName(c);
+  c.status='Fact Find in progress';
+  c.importedFrom=file.name;
+  return {client:c,fields:n,mapped:dyn.count};
+}
+
+function madsImportModal(){
+  const r=S.flow&&S.flow.result;
+  let h=mHead('Import an existing MADS','Creates a client from a workbook you have already filled in.');
+  h+='<div class="m-b">';
+  if(r){
+    h+='<div class="note ok"><span class="ic">'+ic('checkc',15)+'</span><div><b>'+esc(clientName(r.client))+'</b> read from '
+      +esc(r.client.importedFrom)+' — '+r.fields+' fields found using this workbook’s own Template sheet ('+r.mapped+' known columns).</div></div>'
+      +'<div class="kv"><span class="k">Date of birth</span><span class="v">'+esc(fdate((r.client.data.personal.a1||{}).dob))+'</span></div>'
+      +'<div class="kv"><span class="k">Pensions / investments / cash</span><span class="v">'
+      +((r.client.data.dcPensions||[]).length)+' / '+((r.client.data.investments||[]).length)+' / '+((r.client.data.cash||[]).length)+'</span></div>'
+      +'<div class="kv"><span class="k">Properties</span><span class="v">'+((r.client.data.properties||[]).length)+'</span></div>'
+      +'<div class="kv"><span class="k">Fact Find completion</span><span class="v">'+overall(r.client)+'%</span></div>'
+      +'<div class="note mut mt"><span class="ic">'+ic('info',15)+'</span><div>Check the record after importing. Anything the '
+      +'workbook left blank stays blank here, and free-text answers come across exactly as they were typed.</div></div>';
+  } else {
+    h+='<div class="field"><label class="lbl">The completed MADS (.xlsm)</label>'
+      +'<input type="file" id="madsInFile" class="inp" accept=".xlsm,.xlsx"></div>'
+      +'<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>The workbook is read in your browser and never '
+      +'uploaded anywhere. Fields are located through the workbook’s own Template sheet, so any MADS version works.</div></div>';
+  }
+  h+='</div><div class="m-f"><button class="btn" data-a="close">'+(r?'Cancel':'Close')+'</button>'
+    +(r?'<button class="btn pri" data-a="madsImportSave">'+ic('check',14)+' Create this client</button>'
+       :'<button class="btn pri" data-a="madsImportGo">'+ic('up',14)+' Read the workbook</button>')+'</div>';
+  openModal(h);
+}
+
+/* LifePlan gets its own place in the rail, under Work requests. */
+const _railHTMLL=railHTML;
+railHTML=function(){
+  const plans=DB.clients.filter(c=>hasPlan(c)||isPlanOnly(c)).length;
+  /* the rail's "Recent" list is for clients; standalone plans live in LifePlan */
+  const all=DB.clients;
+  DB.clients=all.filter(c=>!isPlanOnly(c));
+  let base; try{ base=_railHTMLL(); } finally { DB.clients=all; }
+  return base.replace(
+    /(<button class="rail-item[^"]*" data-a="go" data-v="export">)/,
+    '<button class="rail-item'+(S.screen==='lifeplan'||S.screen==='cashflow'?' on':'')+'" data-a="go" data-v="lifeplan">'
+      +ic('chart',16)+'<span>LifePlan</span>'+(plans?'<span class="pc">'+plans+'</span>':'')+'</button>$1');
+};
+const _renderL=render;
+render=function(){
+  if(S.screen==='lifeplan'){
+    $('#root').innerHTML='<div class="shell">'+railHTML()
+      +'<div class="main">'+topHTML()+storageBanner()+'<div class="page">'+screenLifeplan()+'</div></div></div>';
+    return;
+  }
+  _renderL();
+};
+
+Object.assign(ACT,{
+  /* ---- LifePlan ---- */
+  planOpen(v){ S.clientId=v; S.screen='cashflow'; S.cfTab='chart'; CF_MC=null; render(); window.scrollTo(0,0); },
+  planNew(){
+    const c=blankClient(); c.planOnly=true; c.status='Plan only';
+    c.data.personal.a1={firstName:'New',surname:'plan'};
+    c.cashflow={inflation:2.5};
+    DB.clients.unshift(c); save(true);
+    S.clientId=c.id; S.screen='client'; S.section='personal'; render();
+    toast('Standalone plan created','Fill in the basics — names, dates of birth, pots — then open the cashflow.',null,8000);
+  },
+  planFromClient(){
+    const list=DB.clients.filter(c=>!isPlanOnly(c));
+    if(!list.length){ toast('No clients yet','Add a client first, or start a standalone plan.','warn'); return; }
+    let h=mHead('Plan for which client?','The forecast reads straight from their Fact Find.');
+    h+='<div class="m-b"><div class="stack">'
+      +list.sort((a,b)=>(b.updated||'').localeCompare(a.updated||''))
+        .map(c=>'<button class="btn blk" style="justify-content:flex-start;padding:11px 13px" data-a="planOpen" data-v="'+esc(c.id)+'">'
+          +'<span class="av s">'+esc(initials(clientName(c)))+'</span>'
+          +'<span style="text-align:left;min-width:0"><span class="b7 trunc" style="display:block">'+esc(clientName(c))+'</span>'
+          +'<span class="tiny muted mono">'+esc(c.ref)+(hasPlan(c)?' · plan exists':'')+'</span></span></button>').join('')
+      +'</div></div><div class="m-f"><button class="btn" data-a="close">Cancel</button></div>';
+    openModal(h);
+  },
+  /* ---- MADS import ---- */
+  madsImportOpen(){ S.flow={mode:'madsIn'}; madsImportModal(); },
+  async madsImportGo(){
+    const f=($('#madsInFile')||{}).files&&$('#madsInFile').files[0];
+    if(!f){ toast('Choose a file first','Pick the completed MADS workbook.','warn'); return; }
+    toast('Reading','Looking through the workbook…');
+    try{
+      const result=await madsToClient(f);
+      if(!result.fields) throw new Error('Nothing was found in that workbook — is it a completed MADS?');
+      S.flow.result=result; madsImportModal();
+    }catch(e){ toast('Could not read it',e.message,'risk',9000); }
+  },
+  madsImportSave(){
+    const r=S.flow&&S.flow.result; if(!r) return;
+    DB.clients.unshift(r.client); save(true);
+    dismissModal();
+    S.clientId=r.client.id; S.screen='client'; S.section='personal'; render();
+    toast('Client created',clientName(r.client)+' — check the record against the workbook before you rely on it.',null,9000);
+  }
+});

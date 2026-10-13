@@ -1,0 +1,67 @@
+<!doctype html><meta charset="utf-8"><title>worker test</title>
+<script>
+/* A tiny in-memory stand-in for Cloudflare D1: prepare().bind().first()/all()/run() */
+function FakeD1(){
+  const rows={};  // key col|id -> body
+  const stmt=sql=>({ bind(...a){ return {
+    async first(){ if(/^SELECT body FROM docs WHERE col=\?1 AND id=\?2/.test(sql)){ const b=rows[a[0]+'|'+a[1]]; return b?{body:b}:null; } return null; },
+    async all(){ if(/^SELECT body FROM docs WHERE col=\?1$/.test(sql)){ return {results:Object.keys(rows).filter(k=>k.startsWith(a[0]+'|')).map(k=>({body:rows[k]}))}; } return {results:[]}; },
+    async run(){ if(/^INSERT INTO docs/.test(sql)) rows[a[0]+'|'+a[1]]=a[2]; else if(/^DELETE FROM docs/.test(sql)) delete rows[a[0]+'|'+a[1]]; return {success:true}; }
+  }; },
+  async run(){ return {success:true}; } });
+  return {prepare:stmt,_rows:rows};
+}
+window.__run=async function(){
+  const L=[]; const say=s=>L.push(s);
+  try{
+    const src=await (await fetch('/worker.js')).text();
+    say('worker.js bytes='+src.length);
+    const mod=await import(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+    const W=mod.default; say('module exports fetch='+(typeof W.fetch==='function'));
+    const env={DB:FakeD1(),SECRET:'s3cret',SETUP_CODE:'abc123',BASE_URL:'https://sjb.example'};
+    const MAIL=[]; env.RESEND_API_KEY='';
+    let jar='';
+    const call=async(method,path,body,extra)=>{
+      const h=new Headers(extra||{}); if(jar) h.set('cookie',jar);   /* cookies work here: same-realm Request built by us */
+      if(body!=null) h.set('content-type','application/json');
+      const res=await W.fetch(new Request('https://sjb.example'+path,{method,headers:h,body:body!=null?JSON.stringify(body):undefined}),env);
+      const txt=await res.text(); let data=null; try{ data=JSON.parse(txt); }catch(e){}
+      return {status:res.status,data,txt,headers:res.headers};
+    };
+    say('health -> '+(await call('GET','/health')).txt);
+    say('/ serves portal html = '+((await call('GET','/')).txt.indexOf('<title>SJB Fact Find</title>')>=0));
+    say('/shared.js served = '+((await call('GET','/shared.js')).txt.indexOf('const SECTIONS')>=0));
+    say('/f/token serves form = '+((await call('GET','/f/abcdefghijklmnopqrstuvwx')).txt.indexOf('SJB_FORM_BOOT')>=0));
+    say('setup page before any user -> '+(await call('GET','/setup')).status);
+    say('setup with wrong code -> '+(await call('POST','/api/setup',{email:'dion@sjb-global.com',password:'correct horse battery',code:'nope'})).status+' (expect 403)');
+    const t0=performance.now();
+    say('setup ok -> '+(await call('POST','/api/setup',{email:'dion@sjb-global.com',password:'correct horse battery',code:'abc123'})).status+' in '+Math.round(performance.now()-t0)+'ms');
+    say('setup again -> '+(await call('POST','/api/setup',{email:'x@y.z',password:'abcdefghijk',code:'abc123'})).status+' (expect 410)');
+    say('setup page after -> '+(await call('GET','/setup')).status+' (expect 410)');
+    // login: in this harness Set-Cookie is hidden from scripts, so mint the cookie the same way the app does
+    const t1=performance.now();
+    const lg=await call('POST','/api/login',{email:'dion@sjb-global.com',password:'correct horse battery'});
+    say('login -> '+lg.status+' in '+Math.round(performance.now()-t1)+'ms');
+    // We cannot read Set-Cookie in a browser; reconstruct a valid session the way the server does:
+    const users=Object.keys(env.DB._rows).filter(k=>k.startsWith('users|')).map(k=>JSON.parse(env.DB._rows[k]));
+    const enc=new TextEncoder(); const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    const key=await crypto.subtle.importKey('raw',enc.encode(env.SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const exp=Date.now()+86400000; const payload=users[0].id+'.'+exp;
+    const sig=b64u(new Uint8Array(await crypto.subtle.sign('HMAC',key,enc.encode(payload))));
+    jar='sjb_s='+payload+'.'+sig;
+    say('me with minted cookie -> '+JSON.stringify((await call('GET','/api/me')).data));
+    const client={id:'cl-9',ref:'SJB-2026-009',name:'x',status:'Awaiting client',data:{meta:{ffCurrency:'GBP',adviser:'Dion'},personal:{a1:{firstName:'Test',surname:'Client'},a2:{}}}};
+    say('put client -> '+JSON.stringify((await call('PUT','/api/state',{clients:[client]})).data));
+    const link=(await call('POST','/api/clients/cl-9/form')).data; say('link -> '+link.url);
+    const tok=link.token; jar='';
+    const ctx=(await call('GET','/api/form/'+tok)).data; say('client ctx name='+ctx.clientName+' sections='+Object.keys(ctx.data).length);
+    const d=ctx.data; d.personal.a1.dob='1970-01-02'; d.cash=[{bank:'Monzo',ccy:'GBP',amount:'5000'}];
+    say('submit -> '+(await call('POST','/api/form/'+tok+'/submit',{data:d,joint:false})).status);
+    jar='sjb_s='+payload+'.'+sig;
+    const st=(await call('GET','/api/state')).data;
+    say('after: status='+st.clients[0].status+' dob='+st.clients[0].data.personal.a1.dob+' cash='+st.clients[0].data.cash.length+' inbox='+st.inbox.length);
+    say('D1 rows stored='+Object.keys(env.DB._rows).length+' cols='+[...new Set(Object.keys(env.DB._rows).map(k=>k.split('|')[0]))].join(','));
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,3).join(' ~ ')); }
+  return L.join('\n');
+};
+</script><body>worker test</body>

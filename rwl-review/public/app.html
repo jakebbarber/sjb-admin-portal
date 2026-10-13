@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RWL Review</title>
+<style>
+:root{--ink:#1f2a33;--muted:#5b6b78;--line:#dde3e8;--bg:#f3f5f7;--card:#fff;--blue:#0b5fff;--green:#13804b;--amber:#b36b00;--red:#b00020}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.45}
+header{background:#fff;border-bottom:1px solid var(--line);padding:14px 24px;display:flex;align-items:center;gap:16px}
+header h1{font-size:18px;margin:0;flex:1}
+header .who{color:var(--muted);font-size:14px}
+header button{background:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px;font-size:14px;cursor:pointer}
+main{max-width:1060px;margin:0 auto;padding:24px 16px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:18px}
+.card h2{font-size:17px;margin:0 0 12px;display:flex;align-items:center;gap:10px}
+.step{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--blue);color:#fff;font-size:14px;font-weight:700}
+.step.done{background:var(--green)}
+.step.off{background:#c3ccd3}
+label{display:block;font-size:14px;color:var(--muted);margin-bottom:4px}
+input[type=text],textarea{width:100%;padding:11px 12px;border:1px solid #cfd6dc;border-radius:8px;font:inherit}
+textarea{min-height:170px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:640px){.row{grid-template-columns:1fr}}
+.btn{display:inline-block;background:var(--blue);color:#fff;border:0;border-radius:8px;padding:12px 18px;font-size:16px;font-weight:600;cursor:pointer}
+.btn.secondary{background:#fff;color:var(--ink);border:1px solid #cfd6dc}
+.btn.green{background:var(--green)}
+.btn[disabled]{opacity:.5;cursor:default}
+.hint{font-size:14px;color:var(--muted);margin:8px 0 0}
+.drop{border:2px dashed #b9c3cc;border-radius:10px;padding:26px;text-align:center;color:var(--muted);cursor:pointer;background:#fafbfc}
+.drop.has{border-color:var(--green);color:var(--ink)}
+.msg{margin-top:12px;font-size:15px}
+.msg.err{color:var(--red)}
+.msg.ok{color:var(--green)}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:13px;font-weight:600;background:#e8eef7;color:#2b4a7a}
+.pill.must{background:#fde8ec;color:var(--red)}
+.pill.should{background:#fff3df;color:var(--amber)}
+.pill.ok{background:#e3f4ea;color:var(--green)}
+.edit{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px;display:grid;grid-template-columns:28px 1fr;gap:12px}
+.edit .op{font-size:13px;color:var(--muted);margin-bottom:4px}
+.edit .txt{white-space:pre-wrap;background:#f7f9fb;border-radius:8px;padding:10px;font-size:15px}
+.edit .lead{font-weight:700}
+.edit.skipped{opacity:.55}
+.spin{display:inline-block;width:16px;height:16px;border:2px solid #c3ccd3;border-top-color:var(--blue);border-radius:50%;animation:s 1s linear infinite;vertical-align:-3px;margin-right:8px}
+@keyframes s{to{transform:rotate(360deg)}}
+.list a{color:var(--blue);text-decoration:none;font-weight:600}
+.topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.topbar .grow{flex:1}
+pre.reply{white-space:pre-wrap;background:#f7f9fb;border-radius:8px;padding:12px;font:inherit;font-size:15px}
+.need{background:#fff8e6;border:1px solid #f1d58a;border-radius:8px;padding:10px 12px;font-size:15px}
+.mock{background:#fff3df;color:var(--amber);font-size:13px;padding:4px 10px;border-radius:999px}
+</style>
+</head>
+<body>
+<header>
+  <h1>RWL Review</h1>
+  <span id="mock" class="mock" hidden>Sandbox: Claude is mocked</span>
+  <span class="who" id="who"></span>
+  <button id="logout">Sign out</button>
+</header>
+<main>
+
+<section id="home">
+  <div class="topbar">
+    <div class="grow"><strong>Reason Why Letters</strong> <span class="hint" style="display:inline">· checked before they go to Compliance, or fixed when they come back</span></div>
+    <button class="btn" id="newBtn">+ New review</button>
+  </div>
+  <div class="card list">
+    <table><thead><tr><th>Reference</th><th>Adviser</th><th>Status</th><th>Updated</th><th>By</th><th></th></tr></thead><tbody id="cases"><tr><td colspan="6" class="hint">Loading…</td></tr></tbody></table>
+  </div>
+  <p class="hint">Files are kept for <span id="ret">30</span> days and then removed automatically. Delete a case sooner from inside it once the adviser has the redlined letter.</p>
+</section>
+
+<section id="newCase" hidden>
+  <div class="card">
+    <h2><span class="step">1</span> Upload the letter</h2>
+    <div class="row">
+      <div><label for="ref">Case reference (initials or file number, not the full name)</label><input type="text" id="ref" placeholder="e.g. YR-DC-0412"></div>
+      <div><label for="adviser">Adviser</label><input type="text" id="adviser" placeholder="e.g. Vickey"></div>
+    </div>
+    <br>
+    <div class="drop" id="drop">Drop the RWL here or click to choose the Word file (.docx)</div>
+    <input type="file" id="file" accept=".docx" hidden>
+    <div class="msg" id="upMsg"></div>
+    <br>
+    <button class="btn" id="upload" disabled>Upload and continue</button>
+    <button class="btn secondary" id="cancelNew">Back</button>
+  </div>
+</section>
+
+<section id="caseView" hidden>
+  <div class="topbar">
+    <button class="btn secondary" id="back">← All letters</button>
+    <div class="grow"><strong id="cRef"></strong> <span class="hint" style="display:inline" id="cMeta"></span></div>
+    <a class="btn secondary" id="dlOrig" href="#" download>Original</a>
+    <button class="btn secondary" id="del">Delete case</button>
+  </div>
+
+  <div class="card">
+    <h2><span class="step" id="s2">2</span> Check against the Blacktower manual <span class="hint" style="margin:0 0 0 auto">optional, before you submit</span></h2>
+    <p class="hint">Reads the letter against the review rubric (the same rules Compliance applies) and lists anything that would come back.</p>
+    <button class="btn" id="precheck">Run the check</button>
+    <div class="msg" id="pcMsg"></div>
+    <div id="findings"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step" id="s3">3</span> Paste the email from Compliance</h2>
+    <label for="email">The whole email, as received</label>
+    <textarea id="email" placeholder="Hi …, please see the points below …"></textarea>
+    <br><br>
+    <button class="btn" id="revise">Work out the changes</button>
+    <div class="msg" id="rvMsg"></div>
+  </div>
+
+  <div class="card" id="planCard" hidden>
+    <h2><span class="step" id="s4">4</span> Review the proposed changes</h2>
+    <p class="hint">Untick anything you do not want. Everything ticked goes into the Word file as a tracked change for the adviser to accept or reject.</p>
+    <div id="needs"></div>
+    <div id="edits"></div>
+    <button class="btn green" id="apply">Write the redlined Word file</button>
+    <div class="msg" id="apMsg"></div>
+  </div>
+
+  <div class="card" id="doneCard" hidden>
+    <h2><span class="step done">✓</span> Done</h2>
+    <p id="doneTxt"></p>
+    <a class="btn green" id="dlRed" href="#" download>Download redlined letter (.docx)</a>
+    <h3 style="font-size:15px;margin:22px 0 8px">Draft reply to Compliance</h3>
+    <pre class="reply" id="reply"></pre>
+    <button class="btn secondary" id="copyReply">Copy reply</button>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px">History</h2>
+    <table><tbody id="events"></tbody></table>
+  </div>
+</section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const when = t => new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+const STATUS = { uploaded: 'Uploaded', 'checked-ready': 'Checked · ready', 'checked-issues': 'Checked · issues found', 'edits-proposed': 'Changes proposed', redlined: 'Redlined' };
+let me = null, cur = null, file = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { location.reload(); throw new Error('signed out'); }
+  const j = await r.json().catch(() => ({ error: 'Unexpected reply from the server' }));
+  if (!r.ok) throw new Error(j.error || ('Request failed (' + r.status + ')'));
+  return j;
+}
+const busy = (el, on, text) => { el.className = 'msg'; el.innerHTML = on ? '<span class="spin"></span>' + esc(text || 'Working…') : ''; };
+const show = id => { for (const s of ['home', 'newCase', 'caseView']) $('#' + s).hidden = s !== id; };
+
+async function init() {
+  me = await api('/api/me');
+  $('#who').textContent = me.name;
+  $('#mock').hidden = !me.mock;
+  $('#ret').textContent = me.retentionDays;
+  loadList();
+}
+async function loadList() {
+  const { cases } = await api('/api/cases');
+  $('#cases').innerHTML = cases.length ? cases.map(c => '<tr><td><a href="#" data-id="' + esc(c.id) + '">' + esc(c.ref) + '</a></td><td>' + esc(c.adviser) + '</td><td><span class="pill' + (c.status === 'redlined' || c.status === 'checked-ready' ? ' ok' : '') + '">' + esc(STATUS[c.status] || c.status) + '</span></td><td>' + when(c.updated) + '</td><td>' + esc(c.created_by) + '</td><td></td></tr>').join('')
+    : '<tr><td colspan="6" class="hint">No letters yet. Click “New review” to upload one.</td></tr>';
+  $('#cases').querySelectorAll('a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openCase(a.dataset.id); }));
+}
+
+/* ---- step 1: upload ---- */
+$('#newBtn').onclick = () => { file = null; $('#ref').value = ''; $('#adviser').value = ''; $('#drop').textContent = 'Drop the RWL here or click to choose the Word file (.docx)'; $('#drop').classList.remove('has'); $('#upload').disabled = true; $('#upMsg').textContent = ''; show('newCase'); };
+$('#cancelNew').onclick = () => show('home');
+$('#drop').onclick = () => $('#file').click();
+$('#drop').ondragover = e => { e.preventDefault(); };
+$('#drop').ondrop = e => { e.preventDefault(); pick(e.dataTransfer.files[0]); };
+$('#file').onchange = e => pick(e.target.files[0]);
+function pick(f) {
+  if (!f) return;
+  if (!/\.docx$/i.test(f.name)) { $('#upMsg').className = 'msg err'; $('#upMsg').textContent = 'That is not a Word .docx file.'; return; }
+  file = f; $('#drop').textContent = f.name + ' · ' + Math.round(f.size / 1024) + ' KB'; $('#drop').classList.add('has'); $('#upload').disabled = false; $('#upMsg').textContent = '';
+}
+$('#upload').onclick = async () => {
+  if (!$('#ref').value.trim()) { $('#upMsg').className = 'msg err'; $('#upMsg').textContent = 'Give the case a reference first.'; return; }
+  const fd = new FormData(); fd.append('ref', $('#ref').value.trim()); fd.append('adviser', $('#adviser').value.trim()); fd.append('file', file);
+  busy($('#upMsg'), true, 'Reading the letter…');
+  try { const r = await api('/api/cases', { method: 'POST', body: fd }); await openCase(r.id); loadList(); }
+  catch (e) { $('#upMsg').className = 'msg err'; $('#upMsg').textContent = e.message; }
+};
+
+/* ---- case view ---- */
+async function openCase(id) {
+  cur = await api('/api/cases/' + id);
+  $('#cRef').textContent = cur.ref;
+  $('#cMeta').textContent = (cur.adviser ? cur.adviser + ' · ' : '') + cur.original_name + ' · ' + (STATUS[cur.status] || cur.status);
+  $('#dlOrig').href = '/api/cases/' + id + '/download?which=original';
+  $('#dlRed').href = '/api/cases/' + id + '/download?which=redlined';
+  $('#email').value = cur.email || '';
+  $('#pcMsg').textContent = ''; $('#rvMsg').textContent = ''; $('#apMsg').textContent = '';
+  renderFindings(cur.findings);
+  renderPlan(cur.plan, cur.result && cur.result.dry);
+  renderDone(cur.result && cur.result.insertions != null ? cur.result : null, cur.plan);
+  $('#events').innerHTML = (cur.events || []).map(e => '<tr><td style="white-space:nowrap;color:var(--muted)">' + when(e.at) + '</td><td>' + esc(e.who) + '</td><td>' + esc(e.what) + '</td></tr>').join('') || '<tr><td class="hint">Nothing yet</td></tr>';
+  $('#s2').className = 'step' + (cur.findings ? ' done' : '');
+  $('#s3').className = 'step' + (cur.plan ? ' done' : '');
+  show('caseView');
+}
+$('#back').onclick = () => { show('home'); loadList(); };
+$('#del').onclick = async () => {
+  if (!confirm('Delete this case and both Word files? The adviser should already have the redlined letter.')) return;
+  await api('/api/cases/' + cur.id, { method: 'DELETE' }); show('home'); loadList();
+};
+
+/* ---- step 2: pre-check ---- */
+$('#precheck').onclick = async () => {
+  busy($('#pcMsg'), true, 'Reading the letter against the manual (this can take a minute or two)…'); $('#precheck').disabled = true;
+  try { const r = await api('/api/cases/' + cur.id + '/precheck', { method: 'POST' }); renderFindings(r.findings); busy($('#pcMsg'), false); $('#s2').className = 'step done'; }
+  catch (e) { $('#pcMsg').className = 'msg err'; $('#pcMsg').textContent = e.message; }
+  $('#precheck').disabled = false;
+};
+function renderFindings(f) {
+  const el = $('#findings');
+  if (!f) { el.innerHTML = ''; return; }
+  el.innerHTML = '<p class="msg ' + (f.ready_to_submit ? 'ok' : '') + '" style="margin-top:14px"><strong>' + (f.ready_to_submit ? 'Looks ready to submit.' : f.findings.length + ' point' + (f.findings.length === 1 ? '' : 's') + ' Compliance would raise.') + '</strong> ' + esc(f.summary) + '</p>'
+    + (f.findings.length ? '<table><thead><tr><th>Rule</th><th>Para</th><th>Issue</th><th>What would satisfy it</th></tr></thead><tbody>'
+      + f.findings.map(x => '<tr><td><span class="pill ' + esc(x.severity) + '">' + esc(x.rule) + ' · ' + esc(x.severity) + '</span></td><td>' + (x.paragraph == null ? '—' : esc(x.paragraph)) + '</td><td>' + esc(x.issue) + '</td><td>' + esc(x.fix) + '</td></tr>').join('') + '</tbody></table>' : '');
+}
+
+/* ---- step 3: compliance email -> edits ---- */
+$('#revise').onclick = async () => {
+  const email = $('#email').value.trim();
+  if (email.length < 40) { $('#rvMsg').className = 'msg err'; $('#rvMsg').textContent = 'Paste the whole email from Compliance first.'; return; }
+  busy($('#rvMsg'), true, 'Mapping each point to a change in the letter (this can take a minute or two)…'); $('#revise').disabled = true;
+  try { const r = await api('/api/cases/' + cur.id + '/revise', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) });
+    cur.plan = r.plan; renderPlan(r.plan, r.dry); busy($('#rvMsg'), false); $('#s3').className = 'step done'; $('#doneCard').hidden = true; $('#planCard').scrollIntoView({ behavior: 'smooth' }); }
+  catch (e) { $('#rvMsg').className = 'msg err'; $('#rvMsg').textContent = e.message; }
+  $('#revise').disabled = false;
+};
+const OPS = { replace: 'Replace paragraph', insert_after: 'Add after paragraph', delete: 'Delete paragraph' };
+function renderPlan(plan, dry) {
+  $('#planCard').hidden = !plan;
+  if (!plan) return;
+  const cannot = new Map((dry && dry.skipped || []).map(s => [s.k, s.why]));
+  $('#needs').innerHTML = plan.needs_adviser && plan.needs_adviser.length ? '<div class="need"><strong>The adviser needs to fill in:</strong><ul style="margin:6px 0 0">' + plan.needs_adviser.map(n => '<li>' + esc(n) + '</li>').join('') + '</ul></div><br>' : '';
+  $('#edits').innerHTML = plan.edits.map((e, k) => '<div class="edit' + (cannot.has(k) ? ' skipped' : '') + '"><div><input type="checkbox" data-k="' + k + '"' + (cannot.has(k) ? ' disabled' : ' checked') + '></div><div>'
+    + '<div class="op"><span class="pill">Point ' + esc(e.point) + '</span> &nbsp;' + esc(OPS[e.op] || e.op) + ' [' + esc(e.para) + '] <em>“' + esc(String(e.anchor).slice(0, 70)) + '…”</em>' + (cannot.has(k) ? ' — <strong>cannot be placed: ' + esc(cannot.get(k)) + '</strong>' : '') + '</div>'
+    + (e.op === 'delete' ? '' : '<div class="txt">' + (e.lead ? '<span class="lead">' + esc(e.lead) + '</span> ' : '') + esc(e.text) + '</div>')
+    + '<div class="hint">' + esc(e.reason) + '</div></div></div>').join('') || '<p class="hint">No changes were proposed.</p>';
+}
+
+/* ---- step 4: write the tracked changes ---- */
+$('#apply').onclick = async () => {
+  const skip = [...$('#edits').querySelectorAll('input[type=checkbox]')].filter(c => !c.checked).map(c => Number(c.dataset.k));
+  busy($('#apMsg'), true, 'Writing tracked changes into the Word file…'); $('#apply').disabled = true;
+  try { const r = await api('/api/cases/' + cur.id + '/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ skip }) });
+    busy($('#apMsg'), false); renderDone(r, cur.plan); $('#doneCard').scrollIntoView({ behavior: 'smooth' }); }
+  catch (e) { $('#apMsg').className = 'msg err'; $('#apMsg').textContent = e.message; }
+  $('#apply').disabled = false;
+};
+function renderDone(r, plan) {
+  $('#doneCard').hidden = !r;
+  if (!r) return;
+  $('#doneTxt').textContent = r.applied + ' change' + (r.applied === 1 ? '' : 's') + ' written as tracked changes (' + r.insertions + ' insertions, ' + r.deletions + ' deletions)' + (r.skipped.length ? '; ' + r.skipped.length + ' could not be placed and are listed in the reply for the adviser.' : '.') + ' Open the file in Word and use Review → Accept/Reject.';
+  $('#reply').textContent = (plan && plan.reply || '') + (r.skipped.length ? '\n\nStill to do by hand:\n' + r.skipped.map(s => '- Point ' + s.edit.point + ': ' + s.edit.reason + ' (' + s.why + ')').join('\n') : '');
+}
+$('#copyReply').onclick = () => navigator.clipboard.writeText($('#reply').textContent).then(() => { $('#copyReply').textContent = 'Copied'; setTimeout(() => $('#copyReply').textContent = 'Copy reply', 1500); });
+$('#logout').onclick = async () => { await fetch('/api/logout'); location.reload(); };
+init().catch(e => { document.body.innerHTML = '<p style="padding:40px">' + esc(e.message) + '</p>'; });
+</script>
+</body>
+</html>

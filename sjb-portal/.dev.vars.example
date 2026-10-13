@@ -1,0 +1,4 @@
+SECRET=sandbox-session-secret-not-for-production
+SETUP_CODE=sandbox
+MOCK_AI=1
+# To test against the real model: remove MOCK_AI and add ANTHROPIC_API_KEY=sk-ant-...

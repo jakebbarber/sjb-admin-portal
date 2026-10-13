@@ -1,0 +1,1450 @@
+/* ===========================================================================
+   CEDING SCHEMES — the Reco tab's per-pension questions, and reading them
+   straight out of the provider's reply.
+
+   When a letter of authority comes back, the provider answers the same set of
+   questions every time: what the plan is worth, what it charges, what it lets
+   you do at retirement, what happens on death. Admin needs those answers in
+   the MADS before they can process an application, and today they get typed
+   in twice — once from the provider's document, once into the workbook.
+
+   So: one panel that shows every ceding pension side by side, and a reader
+   that pulls the answers out of the document. The reader is ordinary code —
+   it finds the question and takes the answer next to it. Nothing is written
+   to the record until the adviser has seen what was found and approved it.
+   ========================================================================= */
+
+/* The questions, in the MADS Reco sheet's own order. `pats` are what the
+   label looks like in a provider's document — the first is the MADS wording,
+   the rest are the phrasings that actually turn up. */
+const SCHEME_FIELDS=[
+  {id:'name', label:'DC pension name', type:'text',
+   pats:[/^dc pension name/i,/^(scheme|plan|policy|product|pension)\s*name/i,/^name of (the )?(scheme|plan|pension)/i,
+         /^provider('s)? name/i,/^ceding (scheme|provider)/i,/^type of (policy|plan|scheme|product)/i,
+         /^(policy|plan|product) type/i],
+   ask:'the name of the pension scheme or provider'},
+  {id:'dcReco', label:'DC recommendation', type:'choice', list:'dcReco',
+   pats:[/^dc recommendation/i,/^recommendation$/i], ask:'omit this — it is the adviser\'s own decision'},
+  {id:'partialAmount', label:'If partial transfer, amount transferring', type:'money',
+   pats:[/partial transfer.*amount/i,/amount being transferred/i,/^partial transfer value/i],
+   ask:'the amount being transferred if this is a partial transfer'},
+  {id:'value', label:'Value', type:'money',
+   pats:[/^(current |plan |fund |policy )?value$/i,/^(current|fund|plan|policy) value/i,/^total fund value/i,
+         /^value of (the )?(plan|fund|policy|units)/i,/^total (policy|plan) value/i,/^surrender value/i,
+         /^encashment value/i,/^total value of (your )?(policy|plan|fund)/i],
+   ask:'the current fund or policy value, as a number'},
+  {id:'tvq', label:'TVQ amount', type:'money',
+   pats:[/^tvq amount/i,/^transfer value$/i,/^transfer value (quotation|amount)/i,/^cash equivalent transfer value/i,
+         /^cetv/i,/guaranteed transfer value/i,/^current transfer value/i,/^transfer value of (your )?(policy|plan)/i,
+         /amount (available|payable) (on|to) transfer/i],
+   ask:'the transfer value quoted'},
+  {id:'tvqDate', label:'Date of TVQ', type:'date',
+   pats:[/date of (the )?(tvq|transfer value)/i,/transfer value.*date/i,/^quotation date/i,/^valuation date/i,
+         /^guarantee(d)? date/i],
+   ask:'the date the transfer value was quoted, as dd/mm/yyyy'},
+  {id:'exitFee', label:'Exit fee / bonus', type:'text',
+   pats:[/^exit fee/i,/exit (fee|charge|penalty)/i,/^early (exit|encashment|surrender)/i,/market value (reduction|adjustment)/i,
+         /^(terminal|loyalty|final) bonus/i,/^transfer (charge|penalty|fee)/i,/^surrender (charge|penalty)/i,
+         /^(mvr|mva)$/i,/penalty on transfer/i],
+   ask:'any exit fee, penalty or bonus that applies on transfer'},
+  {id:'policyNo', label:'Policy number', type:'text',
+   pats:[/^policy (number|no)\b/i,/^(plan|scheme|member|account|contract) (number|no|reference)\b/i,
+         /^(policy|plan|member) ref\b/i,/^reference (number|no)\b/i],
+   ask:'the policy, plan or member number'},
+  {id:'fundSelection', label:'Fund selection', type:'long',
+   pats:[/^fund selection/i,/^funds? (held|invested|selected)/i,/^current (fund|investment)/i,
+         /^investment (choice|selection|fund)/i,/number of funds available/i,/invested in the following funds/i,
+         /^fund(s)? (name|breakdown|split)/i],
+   ask:'the funds the plan is currently invested in'},
+  {id:'performance', label:'What has the performance been?', type:'long',
+   pats:[/what has the performance been/i,/^(fund |investment )?performance( of the fund| to date| figures)?$/i,
+         /^fund performance/i,/(annualised|cumulative) (return|performance)/i,/^past performance/i],
+   ask:'the fund performance figures given'},
+  {id:'bidOffer', label:'Bid/offer spread (%)', type:'percent',
+   pats:[/bid\s*[\/-]?\s*offer spread/i,/^spread$/i],
+   ask:'the bid/offer spread as a percentage number'},
+  {id:'retOptionsUK', label:'Retirement options in the UK', type:'long',
+   pats:[/retirement options.*(in the )?uk/i,/^retirement options$/i,/retirement options$/i,/flexi-?access drawdown available/i,
+         /^options at retirement/i,/what (retirement )?options are available/i],
+   ask:'what retirement options are available to a UK resident'},
+  {id:'retOptionsNonUK', label:'Retirement options as a non-UK resident', type:'long',
+   pats:[/retirement options.*non-?uk/i,/non-?uk resident.*retirement/i,/choose these retirement options as a non-?uk/i],
+   ask:'what retirement options are available to a non-UK resident'},
+  {id:'deathUK', label:'Death benefits as a UK resident', type:'long',
+   pats:[/death benefit.*(uk resident|as a uk)/i,/^death benefits?$/i,/beneficiary.*lump sum/i,
+         /what happens (to the plan )?on death/i],
+   ask:'the death benefit options for a UK resident'},
+  {id:'deathNonUK', label:'Death benefits as a non-UK resident', type:'long',
+   pats:[/death benefit.*non-?uk/i,/non-?uk resident.*death/i,/dependant.{0,3}s or nominee.{0,3}s flexi-?access/i],
+   ask:'the death benefit options for a non-UK resident'},
+  {id:'guarantees', label:'Guarantees or bonuses', type:'long',
+   pats:[/^guarantee(s|d)?( or bonus(es)?)?$/i,/^does the scheme have any guarantees/i,/^guaranteed benefits/i,
+         /guaranteed (annuity|minimum) (rate|pension)/i,/^gar\b/i,/safeguarded benefit/i],
+   ask:'any guarantees, guaranteed annuity rates, bonuses or safeguarded benefits'},
+  {id:'crystallised', label:'Crystallised or uncrystallised', type:'choice', list:'crystallised',
+   pats:[/crystallised or uncrystallised/i,/^crystallisation status/i,/^(un)?crystallised$/i,/benefits.*crystallised/i],
+   ask:'whether the plan is crystallised, uncrystallised or partially crystallised'},
+  {id:'crystallisedPct', label:'If part crystallised, % crystallised', type:'percent',
+   pats:[/percentage (is )?crystallised/i,/part crystallised.*percentage/i,/%\s*crystallised/i],
+   ask:'the percentage of the plan that is crystallised'},
+  {id:'adviserFeePct', label:'UK only — annual adviser fee on the plan (%)', type:'percent',
+   pats:[/annual adviser\s*%?\s*fee/i,/adviser (charge|fee).*(per ?annum|annual|ongoing)/i,/ongoing adviser charge/i],
+   ask:'the ongoing adviser fee taken from the plan, as a percentage number'},
+  {id:'amc', label:'Total annual charges (%)', type:'percent',
+   pats:[/what are the total annual charges/i,/total annual charge/i,/^(annual|ongoing) (management )?charge/i,
+         /^annual management charge/i,/^amc\b/i,/total expense ratio/i,/^ter$/i,/^ocf$/i,/reduction in yield/i,
+         /^(product|policy|plan|scheme) charge/i,/^yearly (management )?charge/i],
+   ask:'the total annual charges on the plan, as a percentage number'},
+  {id:'mpaa', label:'MPAA triggered?', type:'choice', list:'ynu',
+   pats:[/mpaa/i,/money purchase annual allowance/i], ask:'whether the money purchase annual allowance has been triggered'},
+  {id:'nmpa', label:'Normal minimum pension age', type:'number',
+   pats:[/normal minimum pension age/i,/^nmpa$/i,/^minimum (retirement|pension) age/i,/protected pension age/i,
+         /^age \d+ protected pension/i,/^selected retirement age/i],
+   ask:'the normal minimum pension age'},
+  {id:'ccy', label:'Currency', type:'choice', list:'currency',
+   pats:[/^currency/i,/currency of (the )?(plan|scheme|policy|fund)/i], ask:'the currency of the plan'}
+];
+function schemeField(id){ return SCHEME_FIELDS.find(f=>f.id===id); }
+
+/* ------------------------------------------------------------------------ */
+/* Getting text out of whatever the provider sent                            */
+/* ------------------------------------------------------------------------ */
+function xmlText(frag){
+  return frag.replace(/<w:tab[^>]*\/>/g,'\t').replace(/<w:br[^>]*\/>/g,'\n')
+    .replace(/<[^>]+>/g,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+    .replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+}
+/* A Word document, as paragraphs plus whatever tables it contains. Tables are
+   worth keeping apart: a question in one cell and its answer in the next is
+   far more reliable than anything you can do with running text. */
+async function docxRead(bytes){
+  const entries=readZip(bytes.buffer?bytes.buffer.slice(0):bytes);
+  const parts=entries.filter(e=>/^word\/(document|header\d*|footer\d*)\.xml$/.test(e.name));
+  const lines=[], tables=[];
+  for(const e of parts){
+    const xml=await entryText(e);
+    for(const t of xml.match(/<w:tbl>[\s\S]*?<\/w:tbl>/g)||[]){
+      const rows=(t.match(/<w:tr[ >][\s\S]*?<\/w:tr>/g)||[]).map(tr=>
+        (tr.match(/<w:tc>[\s\S]*?<\/w:tc>/g)||[]).map(tc=>
+          (tc.match(/<w:p[ >][\s\S]*?<\/w:p>/g)||[tc]).map(p=>xmlText(p)).join('\n').trim()));
+      if(rows.length) tables.push(rows);
+    }
+    /* paragraphs outside tables keep the document's reading order */
+    const flat=xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/g,'');
+    (flat.match(/<w:p[ >][\s\S]*?<\/w:p>/g)||[]).forEach(p=>{
+      const t=xmlText(p).replace(/[  ]+/g,' ').trim();
+      if(t) lines.push(t);
+    });
+  }
+  return {lines,tables};
+}
+/* A spreadsheet is all table, so every row is a candidate label/value pair. */
+async function xlsxRead(bytes){
+  const entries=readZip(bytes.buffer?bytes.buffer.slice(0):bytes);
+  const ssE=entries.find(e=>e.name==='xl/sharedStrings.xml');
+  let strs=[];
+  if(ssE){ const x=await entryText(ssE);
+    strs=(x.match(/<si>[\s\S]*?<\/si>/g)||[]).map(si=>xmlText(si).trim()); }
+  const tables=[];
+  for(const e of entries.filter(x=>/^xl\/worksheets\/sheet\d+\.xml$/.test(x.name))){
+    const xml=await entryText(e);
+    const rows=[];
+    for(const rm of xml.match(/<row[ >][\s\S]*?<\/row>/g)||[]){
+      const cells=[];
+      for(const cm of rm.matchAll(/<c r="([A-Z]+)\d+"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)){
+        const attrs=cm[2]||'', body=cm[3]||'';
+        const v=/<v>([\s\S]*?)<\/v>/.exec(body);
+        const is=/<is>([\s\S]*?)<\/is>/.exec(body);
+        let val='';
+        if(/t="s"/.test(attrs)&&v) val=strs[+v[1]]||'';
+        else if(is) val=xmlText(is[1]);
+        else if(v) val=xmlText(v[1]);
+        cells.push(String(val).trim());
+      }
+      if(cells.some(Boolean)) rows.push(cells);
+    }
+    if(rows.length) tables.push(rows);
+  }
+  return {lines:[],tables};
+}
+/* PDFs, as far as plain code can take them: inflate the content streams and
+   read the text-showing operators. Scanned pages hold pictures, not text, so
+   there is nothing to find in those and we say so rather than pretend. */
+function pdfString(s){
+  return s.replace(/\\([nrtbf()\\]|[0-7]{1,3})/g,(m,g)=>{
+    if(/^[0-7]+$/.test(g)) return String.fromCharCode(parseInt(g,8));
+    return {n:'\n',r:'\n',t:'\t',b:'',f:''}[g]!==undefined?{n:'\n',r:'\n',t:'\t',b:'',f:''}[g]:g;
+  });
+}
+/* Most PDFs written this decade use two-byte character codes, so their text
+   arrives with a null in front of every letter. Dropping the high byte
+   recovers it — but only where what is left actually reads as words, so a
+   font whose codes are glyph numbers is left alone rather than turned into
+   convincing nonsense. */
+function pdfReadable(s){
+  if(!s) return false;
+  let good=0;
+  for(let i=0;i<s.length;i++){
+    const c=s.charCodeAt(i);
+    if(c===9||c===10||(c>=32&&c<127)||(c>=160&&c<0x2200)) good++;
+  }
+  return good/s.length>0.85;
+}
+function pdfLine(s){
+  let t=String(s);
+  if(t.indexOf(String.fromCharCode(0))>=0){
+    const bare=t.split(String.fromCharCode(0)).join('');
+    if(pdfReadable(bare)) t=bare;
+  }
+  return t.replace(/\s+/g,' ').trim();
+}
+async function inflateAny(bin){
+  const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i)&0xff;
+  for(const fmt of ['deflate','deflate-raw']){
+    try{
+      const ds=new DecompressionStream(fmt);
+      const buf=await new Response(new Blob([arr]).stream().pipeThrough(ds)).arrayBuffer();
+      const out=new Uint8Array(buf);
+      let s=''; for(let i=0;i<out.length;i+=0x8000) s+=String.fromCharCode.apply(null,out.subarray(i,Math.min(i+0x8000,out.length)));
+      return s;
+    }catch(e){ /* try the other framing */ }
+  }
+  return null;
+}
+/* A font that encodes its text as glyph numbers carries a ToUnicode map
+   saying what each number means. Without it "<003D>" is unreadable; with it
+   the document reads normally. We merge every map in the file rather than
+   tracking which font each run of text uses — a subset font's numbering is
+   consistent across a document, and a wrong guess would show up immediately
+   as nonsense on screen, before anything is saved. */
+function pdfCMap(chunks){
+  const map={};
+  chunks.forEach(t=>{
+    if(t.indexOf('begincmap')<0) return;
+    (t.match(/beginbfchar([\s\S]*?)endbfchar/g)||[]).forEach(blk=>{
+      const re=/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g; let m;
+      while((m=re.exec(blk))){
+        const u=(m[2].match(/.{1,4}/g)||[]).map(h=>String.fromCharCode(parseInt(h,16))).join('');
+        map[parseInt(m[1],16)]=u;
+      }
+    });
+    (t.match(/beginbfrange([\s\S]*?)endbfrange/g)||[]).forEach(blk=>{
+      const re=/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g; let m;
+      while((m=re.exec(blk))){
+        const lo=parseInt(m[1],16), hi=parseInt(m[2],16), base=parseInt(m[3],16);
+        if(hi-lo>65535) continue;
+        for(let c=lo;c<=hi;c++) map[c]=String.fromCharCode(base+(c-lo));
+      }
+    });
+  });
+  return map;
+}
+async function pdfRead(bytes){
+  const u=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+  let raw=''; for(let i=0;i<u.length;i+=0x8000) raw+=String.fromCharCode.apply(null,u.subarray(i,Math.min(i+0x8000,u.length)));
+  const chunks=[]; let images=0;
+  const re=/stream\r?\n?/g; let m;
+  while((m=re.exec(raw))){
+    if(raw.substr(m.index-3,3)==='end') continue;      /* the word inside "endstream" */
+    const start=m.index+m[0].length;
+    const end=raw.indexOf('endstream',start);
+    if(end<0) break;
+    const head=raw.slice(Math.max(0,m.index-900),m.index);
+    re.lastIndex=end;
+    if(/\/Image|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(head)){ images++; continue; }
+    /* Do not trust /Length — it is often an indirect reference, and reading
+       the number that happens to follow it truncates the stream and loses
+       the page. Take everything up to "endstream" and let the inflater find
+       the end; a stray trailing newline is all that needs trimming. */
+    const body=raw.slice(start,end).replace(/[\r\n]+$/,'');
+    if(!/\/FlateDecode/.test(head)){
+      if(/\/Filter/.test(head)) continue;              /* an encoding we cannot read */
+      chunks.push(body); continue;
+    }
+    const text=await inflateAny(body);
+    if(text!==null) chunks.push(text);
+  }
+  const map=pdfCMap(chunks);
+  const haveMap=Object.keys(map).length>0;
+  const lines=[]; let unmapped=0, glyphs=0;
+  chunks.forEach(content=>{
+    if(content.indexOf('BT')<0) return;
+    (content.match(/BT[\s\S]*?ET/g)||[]).forEach(block=>{
+      let line='', prevY=null, nums=[], depth=0;
+      const flush=()=>{ if(line.trim()) lines.push(pdfLine(line)); line=''; };
+      const show=tok=>{
+        if(tok.charAt(0)==='('){ line+=pdfString(tok.slice(1,-1)); return; }
+        const hex=tok.slice(1,-1).replace(/\s/g,'');
+        if(haveMap&&hex.length%4===0){
+          for(let i=0;i+4<=hex.length;i+=4){
+            const code=parseInt(hex.substr(i,4),16); glyphs++;
+            if(map[code]!==undefined) line+=map[code]; else unmapped++;
+          }
+        } else {
+          for(let i=0;i+1<hex.length;i+=2){
+            const cc=parseInt(hex.substr(i,2),16);
+            if(cc>=32||cc===10) line+=String.fromCharCode(cc);
+          }
+        }
+      };
+      const toks=block.match(/-?\d+\.?\d*|\((?:\\.|[^\\()])*\)|<[0-9A-Fa-f\s]*>|\[|\]|Tm|TD|Td|T\*|TJ|Tj|'|"/g)||[];
+      for(const tok of toks){
+        if(tok==='['){ depth++; nums=[]; continue; }
+        if(tok===']'){ depth=0; continue; }
+        if(/^-?\d+\.?\d*$/.test(tok)){
+          const v=parseFloat(tok);
+          /* inside a TJ array the numbers are kerning, not position; a big
+             negative jump is how many producers write a space */
+          if(depth){ if(v<-150) line+=' '; }
+          else { nums.push(v); if(nums.length>6) nums.shift(); }
+          continue;
+        }
+        if(tok.charAt(0)==='('||tok.charAt(0)==='<'){ show(tok); continue; }
+        /* Td and TD move by (tx,ty) relative to the line. Only a change in y
+           starts a new line — a document that letter-spaces its headings
+           issues "31 0 Td" between every character, and treating those as
+           line breaks turns "Policy values" into twelve separate lines. */
+        if(tok==='Td'||tok==='TD'){
+          const ty=nums.length?nums[nums.length-1]:0;
+          if(Math.abs(ty)>0.5) flush();
+          nums=[]; continue;
+        }
+        if(tok==='Tm'){
+          const y=nums.length>=6?nums[nums.length-1]:null;
+          if(y!==null){ if(prevY!==null&&Math.abs(y-prevY)>0.5) flush(); prevY=y; }
+          nums=[]; continue;
+        }
+        if(tok==='T*'){ flush(); nums=[]; continue; }
+        if(tok==="'"||tok==='"'){ flush(); nums=[]; continue; }
+        nums=[];                                    /* Tj, TJ: nothing to do */
+      }
+      flush();
+    });
+  });
+  /* A PDF made by a scanner holds pictures of pages, not text. Saying that
+     plainly saves the adviser hunting for a fault that is not there. */
+  return {lines,tables:[],images,
+    scanned:!lines.length&&images>0,
+    unmapped:glyphs?unmapped/glyphs:0};
+}
+/* A pack whose pages are pictures often still carries a thin text layer —
+   the address block, a reference, and "Page 3 of 51" on every sheet. There
+   is text, so it is not a scan by the usual test, but none of it is the
+   scheme's answers. Recognising that is the difference between "I found
+   nothing, something must be broken" and "the content is in the pictures". */
+function pdfFurnitureOnly(doc){
+  const lines=unwrapLines(doc.lines);
+  if(!lines.length||!(doc.images>0)) return false;
+  const furniture=/^(page\s*\d+|\d+|of|page \d+ of \d+|[A-Z]{2,}[A-Z0-9 ()\/.-]{0,40})$/i;
+  let plain=0;
+  lines.forEach(l=>{
+    const t=String(l).trim();
+    if(furniture.test(t)||t.length<4||/^\{OPT:/.test(t)||/^\d{1,3}$/.test(t)) return;
+    plain++;
+  });
+  /* a real reply has dozens of substantive lines; a cover sheet has a handful */
+  return plain<20;
+}
+/* One way in, whatever the file is. */
+async function readDocument(file){
+  const name=String(file.name||'').toLowerCase();
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  if(/\.docx$/.test(name)) return Object.assign(await docxRead(bytes),{kind:'Word document'});
+  if(/\.xlsx$|\.xlsm$/.test(name)) return Object.assign(await xlsxRead(bytes),{kind:'spreadsheet'});
+  if(/\.pdf$/.test(name)){
+    const d=await pdfRead(bytes);
+    d.thin=pdfFurnitureOnly(d);
+    return Object.assign(d,{kind:'PDF'});
+  }
+  if(/\.(txt|csv|md)$/.test(name)){
+    const t=new TextDecoder().decode(bytes);
+    const lines=t.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const tables=/\.csv$/.test(name)?[t.split(/\r?\n/).filter(Boolean).map(r=>r.split(',').map(x=>x.replace(/^"|"$/g,'').trim()))]:[];
+    /* The scanned-TVQ reader leaves a marker so we know the figures have been
+       through OCR and deserve a second look. */
+    return {lines,tables,kind:/\.csv$/.test(name)?'CSV':'text file',
+      ocr:/^\[read by OCR/i.test(lines[0]||'')};
+  }
+  if(/\.doc$/.test(name)) throw new Error('That is the old .doc format. Open it in Word and save it as .docx, then try again.');
+  throw new Error('I can read .docx, .pdf, .xlsx, .csv and .txt files.');
+}
+
+/* ===========================================================================
+   READING A DOCUMENT THAT IS PICTURES
+
+   Some packs have no text to find: a scan, or — as with the retirement
+   quotations — a document whose letters were converted to outlines before it
+   was saved, so every word is a drawing. Both need the page turning back
+   into pixels and read with OCR.
+
+   That is done here, in the browser: the page images and the recognised text
+   never leave this machine. The two libraries are fetched from a public CDN
+   the first time and then cached by the browser; if that is blocked, we say
+   so and point at the local reader instead of failing quietly.
+   ========================================================================= */
+const OCR_LIB={
+  pdf:'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
+  pdfWorker:'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js',
+  tess:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js'
+};
+function loadScript(src){
+  return new Promise((ok,fail)=>{
+    if(document.querySelector('script[data-ocr="'+src+'"]')){ ok(); return; }
+    const s=document.createElement('script');
+    s.src=src; s.async=true; s.setAttribute('data-ocr',src);
+    s.onload=()=>ok();
+    s.onerror=()=>fail(new Error('could not load '+src));
+    document.head.appendChild(s);
+  });
+}
+let OCR_READY=null;
+function ocrReady(){
+  if(!OCR_READY) OCR_READY=(async()=>{
+    await loadScript(OCR_LIB.pdf);
+    await loadScript(OCR_LIB.tess);
+    if(typeof pdfjsLib==='undefined'||typeof Tesseract==='undefined')
+      throw new Error('The reading libraries did not load.');
+    pdfjsLib.GlobalWorkerOptions.workerSrc=OCR_LIB.pdfWorker;
+    return true;
+  })().catch(e=>{ OCR_READY=null; throw e; });
+  return OCR_READY;
+}
+let OCR_STOP=false;
+/* Render each page and read it. Pages are independent, so several are read at
+   once — one reader on a twelve-core machine wastes eleven of them. `note` is
+   called as each page lands so the adviser can watch the answers appear and
+   stop as soon as the ones they need are there. */
+async function ocrPdf(file,note,maxPages){
+  await ocrReady();
+  const data=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:data}).promise;
+  const total=Math.min(maxPages||pdf.numPages,pdf.numPages);
+  const cores=(navigator.hardwareConcurrency||4);
+  const n=Math.max(1,Math.min(4,cores-1,total));
+  const sched=Tesseract.createScheduler();
+  for(let i=0;i<n;i++) sched.addWorker(await Tesseract.createWorker('eng'));
+  const pages=new Array(total).fill('');
+  let done=0, next=1;
+  const readOne=async()=>{
+    while(!OCR_STOP){
+      const p=next++;
+      if(p>total) return;
+      const page=await pdf.getPage(p);
+      /* OCR wants about 300 dots per inch. A PDF point is 1/72 inch, so that
+         is roughly four times the natural size — at half of it the reader
+         starts inventing words. Capped so an oversized page cannot exhaust
+         memory. */
+      const base=page.getViewport({scale:1});
+      let scale=300/72;
+      const maxW=4400, maxH=6200;
+      if(base.width*scale>maxW) scale=maxW/base.width;
+      if(base.height*scale>maxH) scale=maxH/base.height;
+      const vp=page.getViewport({scale:scale});
+      const cv=(typeof OffscreenCanvas!=='undefined')
+        ? new OffscreenCanvas(Math.ceil(vp.width),Math.ceil(vp.height))
+        : Object.assign(document.createElement('canvas'),{width:Math.ceil(vp.width),height:Math.ceil(vp.height)});
+      const ctx=cv.getContext('2d');
+      ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height);
+      await page.render({canvasContext:ctx,viewport:vp}).promise;
+      if(page.cleanup) page.cleanup();
+      const img=cv.convertToBlob?await cv.convertToBlob({type:'image/png'}):cv;
+      const r=await sched.addJob('recognize',img);
+      pages[p-1]=String((r&&r.data&&r.data.text)||'');
+      done++;
+      if(note) note(done,total,pages);
+    }
+  };
+  try{
+    const crew=[]; for(let i=0;i<n;i++) crew.push(readOne());
+    await Promise.all(crew);
+  } finally {
+    try{ await sched.terminate(); }catch(e){}
+  }
+  const lines=[];
+  pages.forEach(t=>String(t).split('\n').forEach(l=>{
+    const s=l.replace(/\s+/g,' ').trim();
+    if(s) lines.push(s);
+  }));
+  return {lines,pages:done,readers:n,stopped:OCR_STOP};
+}
+
+/* ------------------------------------------------------------------------ */
+/* Turning what was said into what the field wants                           */
+/* ------------------------------------------------------------------------ */
+const CCY_SIGN={'£':'GBP','€':'EUR','$':'USD','¥':'JPY','CHF':'CHF'};
+function normValue(type,raw,list){
+  let s=String(raw==null?'':raw).replace(/\s+/g,' ').trim();
+  if(!s) return null;
+  /* A number never lives inside the label's own aside — "Current Value (the
+     amount we'd pay if you cash in today)" is a heading, not £0. */
+  if(type==='money'||type==='percent'||type==='number'){
+    const bare=s.replace(/\([^)]*\)/g,' ').replace(/\s+/g,' ').trim();
+    if(!/\d/.test(bare)) return null;
+    s=bare;
+  }
+  if(/^(n\/?a|not applicable|none|nil|not known|unknown|tbc|-|–)$/i.test(s))
+    return (type==='text'||type==='long')?s:null;
+  if(type==='money'){
+    /* OCR reads £ as E almost every time, so "E33,671.29" is a pound sign. */
+    const m=/(-?[\d][\d,\s]*(?:\.\d+)?)/.exec(s.replace(/(^|[\s(])[E£€$](?=[\d.,])/g,'$1').replace(/[^\d.,\-\s]/g,' '));
+    if(!m) return null;
+    const n=Number(m[1].replace(/[,\s]/g,''));
+    return isFinite(n)?n:null;
+  }
+  if(type==='percent'){
+    const m=/(-?\d+(?:\.\d+)?)\s*%/.exec(s)||/(-?\d+(?:\.\d+)?)/.exec(s);
+    if(!m) return null;
+    const n=Number(m[1]);
+    return isFinite(n)?n:null;
+  }
+  if(type==='number'){ const m=/(-?\d+(?:\.\d+)?)/.exec(s); return m?Number(m[1]):null; }
+  if(type==='date'){
+    let m=/(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if(m) return m[1]+'-'+m[2]+'-'+m[3];
+    m=/(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/.exec(s);
+    if(m){ let y=+m[3]; if(y<100) y+=y<50?2000:1900;
+      return y+'-'+d2(+m[2])+'-'+d2(+m[1]); }
+    m=/(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})/.exec(s);
+    if(m){ const mi=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
+        .indexOf(m[2].slice(0,3).toLowerCase());
+      if(mi>=0) return m[3]+'-'+d2(mi+1)+'-'+d2(+m[1]); }
+    return null;
+  }
+  if(type==='choice'){
+    const arr=listFor(list)||[];
+    const hit=arr.find(o=>String(o).toLowerCase()===s.toLowerCase())
+      ||arr.find(o=>s.toLowerCase().indexOf(String(o).toLowerCase())>=0)
+      ||arr.find(o=>String(o).toLowerCase().indexOf(s.toLowerCase())>=0&&s.length>2);
+    if(hit) return hit;
+    if(list==='ynu'||list==='yn'){
+      if(/^y(es)?\b/i.test(s)) return 'Yes';
+      if(/^n(o)?\b/i.test(s)) return 'No';
+    }
+    if(list==='currency'){
+      const sign=Object.keys(CCY_SIGN).find(k=>s.indexOf(k)>=0);
+      if(sign) return CCY_SIGN[sign];
+      const code=/\b([A-Z]{3})\b/.exec(s);
+      if(code&&(listFor('currency')||[]).indexOf(code[1])>=0) return code[1];
+    }
+    return null;
+  }
+  if(type==='long') return s.slice(0,900);
+  return s.slice(0,240);
+}
+
+/* ===========================================================================
+   WHAT THE READER HAS BEEN TAUGHT
+
+   Every provider words the same question differently, and there is no end to
+   the list. Rather than wait for someone to add each new phrasing, the
+   corrections made on the review screen are kept: untick a wrong answer and
+   that label stops being read as that question; fill in a blank one and the
+   label above it starts being read as that question.
+
+   Rules live in the practice settings, so they sync to every adviser and
+   apply to every document read afterwards.
+   ========================================================================= */
+function learnedRules(){
+  if(!DB.settings) DB.settings={};
+  if(!Array.isArray(DB.settings.schemeRules)) DB.settings.schemeRules=[];
+  return DB.settings.schemeRules;
+}
+function ruleKey(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+/* A learned label is matched literally, so anything regex-ish in it has to
+   be defanged first. */
+function reEscape(s){
+  /* No regex here on purpose: writing one to escape another is how this
+     line got mangled twice. */
+  const special=".*+?^${}()|[]"+String.fromCharCode(92);
+  let out="";
+  String(s).split("").forEach(function(ch){
+    out+=(special.indexOf(ch)>=0?String.fromCharCode(92):"")+ch;
+  });
+  return out;
+}
+function patsFor(fd){
+  const extra=learnedRules().filter(r=>r.kind==='means'&&r.field===fd.id);
+  if(!extra.length) return fd.pats;
+  return fd.pats.concat(extra.map(r=>new RegExp('^'+reEscape(String(r.label).trim())+'(?![A-Za-z0-9])','i')));
+}
+function blockedLabel(fd,label){
+  const k=ruleKey(label);
+  if(!k) return false;
+  return learnedRules().some(r=>r.kind==='never'&&r.field===fd.id&&ruleKey(r.label)===k);
+}
+function learnRule(label,field,kind){
+  const text=String(label||'').trim().replace(/[:：?*]+$/,'').trim();
+  if(text.length<3||text.length>80||!/[A-Za-z]{3}/.test(text)) return false;
+  const rules=learnedRules(), k=ruleKey(text);
+  const had=rules.find(r=>ruleKey(r.label)===k&&r.field===field&&r.kind===kind);
+  if(had){ had.seen=(had.seen||1)+1; had.at=iso(new Date()); return false; }
+  /* a label cannot both mean and never-mean the same question */
+  const opp=rules.findIndex(r=>ruleKey(r.label)===k&&r.field===field&&r.kind!==kind);
+  if(opp>=0) rules.splice(opp,1);
+  rules.push({label:text,field:field,kind:kind,by:(DB.settings.adviserName||''),at:iso(new Date()),seen:1});
+  while(rules.length>400) rules.shift();
+  return true;
+}
+/* Where in the document did this value come from? Used when an adviser fills
+   in a question the reader left blank, so the label above it can be learned. */
+function labelForValue(text,value){
+  const lines=unwrapLines(String(text||'').split('\n'));
+  const raw=String(value==null?'':value).trim();
+  if(raw.length<2) return null;
+  const tries=[raw];
+  const n=Number(String(raw).replace(/[^0-9.\-]/g,''));
+  if(isFinite(n)&&n){ tries.push(n.toLocaleString('en-GB',{minimumFractionDigits:2})); tries.push(String(n)); }
+  for(const probe of tries){
+    const v=probe.toLowerCase();
+    if(v.length<2) continue;
+    for(let i=0;i<lines.length;i++){
+      const L=String(lines[i]), at=L.toLowerCase().indexOf(v);
+      if(at<0) continue;
+      const before=L.slice(0,at).replace(/[\s:：\-–—|]+$/,'').trim();
+      if(before.length>=3&&before.length<=80&&/[A-Za-z]{3}/.test(before)) return before;
+      for(let j=i-1;j>=0&&j>=i-2;j--){
+        const p=String(lines[j]).replace(/[:：]\s*$/,'').trim();
+        if(p.length>=3&&p.length<=80&&/[A-Za-z]{3}/.test(p)) return p;
+      }
+    }
+  }
+  return null;
+}
+/* Called once the adviser has said what is right. Compares what they left
+   with what the reader proposed, and keeps the difference. */
+function learnFromReview(d){
+  let taught=0;
+  (d.rows||[]).forEach(r=>{
+    const proposed=r.proposed;                 /* what the reader offered */
+    const kept=r.use?r.value:null;             /* what the adviser agreed to */
+    if(proposed!=null&&proposed!==''&&!r.use&&r.label){
+      /* they rejected it — stop reading that label as this question */
+      if(learnRule(r.label,r.id,'never')) taught++;
+      return;
+    }
+    if((proposed==null||proposed==='')&&kept!=null&&kept!==''){
+      /* they answered something the reader missed — learn where it lives */
+      const lab=labelForValue(d.text,kept);
+      if(lab&&learnRule(lab,r.id,'means')) taught++;
+    }
+  });
+  return taught;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Finding each answer                                                       */
+/* ------------------------------------------------------------------------ */
+function looksLikeLabel(fd,text){
+  const t=String(text||'').replace(/\s+/g,' ').trim().replace(/[:?*]+\s*$/,'');
+  if(!t||t.length>140) return false;
+  if(blockedLabel(fd,t)) return false;
+  return patsFor(fd).some(p=>p.test(t));
+}
+/* "Policy number: AV-118822" — the question, a separator, then the answer.
+   Split the line at each separator in turn and ask whether the left-hand side
+   is this question. Requiring the separator is what stops a sentence that
+   happens to begin "policy number to view the funds…" reading as an answer,
+   and testing the whole left-hand side means it does not matter how much of
+   the wording the pattern itself consumed. */
+const LABEL_SEPS=[/:/g,/\t/g,/\s\|\s/g,/\s[-–—]\s/g,/ {3,}/g];
+/* Which part of "Policy number: AV-118822" was the question? Needed so that
+   rejecting the answer teaches the reader about the right words. */
+function labelOnLine(fd,line){
+  const t=String(line).replace(/[  ]+/g,' ').trim();
+  for(const sep of LABEL_SEPS){
+    sep.lastIndex=0; let m;
+    while((m=sep.exec(t))){
+      const left=t.slice(0,m.index).replace(/[?*]+$/,'').trim();
+      if(left.length<2) continue;
+      if(patsFor(fd).some(p=>p.test(left))) return left;
+    }
+  }
+  return null;
+}
+function afterLabel(fd,line){
+  const t=String(line).replace(/[  ]+/g,' ').trim();
+  if(t.length>300) return null;
+  for(const sep of LABEL_SEPS){
+    sep.lastIndex=0; let m;
+    while((m=sep.exec(t))){
+      const left=t.slice(0,m.index).replace(/[?*]+$/,'').trim();
+      const right=t.slice(m.index+m[0].length).trim();
+      if(left.length<2||!right) continue;
+      if(blockedLabel(fd,left)) continue;
+      if(!patsFor(fd).some(p=>p.test(left))) continue;
+      const rest=right.replace(/^\([^)]*\)\s*:?\s*/,'').trim();   /* drop the label's own aside */
+      if(rest) return rest;
+    }
+  }
+  return null;
+}
+function extractScheme(doc,only){
+  const want=(only&&only.length?SCHEME_FIELDS.filter(f=>only.indexOf(f.id)>=0):SCHEME_FIELDS);
+  const found={};
+  const take=(fd,raw,where,label)=>{
+    if(found[fd.id]||!fieldOk(fd,raw)) return;
+    found[fd.id]={value:normValue(fd.type,raw,fd.list),
+      raw:String(raw).replace(/\s+/g,' ').trim().slice(0,200),where,
+      /* Lining two columns up by position is a guess, however well it scores.
+         Mark it, so the review screen leaves it for the adviser to agree to
+         rather than ticking it on their behalf. */
+      weak:/^paired by position/.test(String(where||'')),label:label||null};
+  };
+  /* tables first — a label cell and its answer cell is the clearest signal */
+  (doc.tables||[]).forEach((tbl,ti)=>{
+    tbl.forEach((row,ri)=>{
+      row.forEach((cell,ci)=>{
+        want.forEach(fd=>{
+          if(found[fd.id]||!looksLikeLabel(fd,cell)) return;
+          for(let j=ci+1;j<row.length;j++){
+            if(String(row[j]||'').trim()){ take(fd,row[j],'table '+(ti+1)+', row '+(ri+1),cell); return; }
+          }
+          /* nothing to the right — try the cell directly below */
+          const below=(tbl[ri+1]||[])[ci];
+          if(String(below||'').trim()) take(fd,below,'table '+(ti+1)+', under row '+(ri+1),cell);
+        });
+      });
+    });
+  });
+  /* then running text: the answer on the same line as its label. Wrapped
+     paragraphs are rejoined first so a single answer that ran to eight
+     lines does not push every later answer out of step. */
+  const lines=unwrapLines(doc.lines);
+  lines.forEach((line,i)=>{
+    want.forEach(fd=>{
+      if(found[fd.id]) return;
+      const rest=afterLabel(fd,line);
+      if(rest) take(fd,rest,'line '+(i+1),labelOnLine(fd,line));
+    });
+  });
+  /* then the shape a two-column page turns into once it has been through OCR:
+     every label read down one column, then every answer down the other. */
+  pairBulletLists(lines,want,take);
+  pairColonLabels(lines,want,take);
+  pairColumns(lines,want,take);
+  /* last and loosest, a label on a line of its own with its answer under it —
+     but only where the line below is plainly an answer and not another label. */
+  lines.forEach((line,i)=>{
+    want.forEach(fd=>{
+      if(found[fd.id]||!looksLikeLabel(fd,line)) return;
+      /* The answer sits on the line under its label. Whether that line is
+         an answer is settled by asking if it suits the question — 'looks
+         like a heading' rejected policy numbers, which is most of what we
+         are here for. */
+      const nxt=lines[i+1];
+      if(nxt&&!anyLabel(want,nxt)&&fieldOk(fd,nxt)) take(fd,nxt,'line '+(i+2),line);
+    });
+  });
+  return found;
+}
+/* A paragraph that wrapped across eight lines is one answer, not eight. Join
+   a line onto the one before it when that one is long and did not finish —
+   labels are short and finished, so they are never swallowed. Everything
+   downstream then lines up: six questions against six answers, rather than
+   six against thirteen. */
+function unwrapLines(lines){
+  const out=[];
+  (lines||[]).forEach(raw=>{
+    const t=String(raw).trim();
+    if(!t) return;
+    const prev=out.length?out[out.length-1]:'';
+    const continues=prev.length>=45
+      && !/[.:;%)\]]$/.test(prev)
+      && !/\d$/.test(prev)
+      && t.length>0
+      && !/^[A-Z][A-Z ]{4,}$/.test(t)          /* a heading in capitals */
+      && !/:$/.test(t);                        /* the next question */
+    if(continues) out[out.length-1]=prev+' '+t;
+    else out.push(t);
+  });
+  return out;
+}
+/* Is this line a label for ANY of the questions we are looking for? */
+function anyLabel(want,line){ return want.some(fd=>looksLikeLabel(fd,line)); }
+/* Does this line read like a heading rather than an answer? Short, no full
+   stop, few words — the shape of the left-hand column on a policy schedule.
+   Used to stop a label being mistaken for the answer below it. */
+function labelish(s){
+  const t=String(s||'').replace(/\s+/g,' ').trim();
+  if(!t||t.length>70) return false;
+  if(/[.,;]$/.test(t)) return false;
+  if(!/[A-Za-z]/.test(t)) return false;
+  if(/^[£€$E]?[\d,.]+%?$/.test(t)) return false;          /* a bare figure */
+  return t.split(' ').length<=7;
+}
+/* Loose version, for spotting a block of columnar lines. Bare figures belong
+   in a block — they are the answers — so this one lets them through. */
+function blockish(s){
+  const t=String(s||'').replace(/\s+/g,' ').trim();
+  return !!t&&t.length<=90&&!/[.;]$/.test(t)&&t.split(' ').length<=14;
+}
+/* Does this read like something a person wrote, or like OCR noise?
+   "Ni A as nein A fief Bs een SEs das rma men Te me Tarai se i" is what a
+   reader produces from a graphic or a page it could not resolve, and it must
+   never reach a MADS field. Real answers have real words: mostly letters,
+   few one- and two-letter fragments, and a vowel in nearly every word. */
+function looksLikeProse(s){
+  const t=String(s==null?'':s).trim();
+  if(t.length<3) return false;
+  const words=t.split(/\s+/).filter(Boolean);
+  if(words.length<3) return true;                  /* "GBP", "AV-118822", "0.85%" */
+  const letters=t.replace(/[^A-Za-z]/g,'').length;
+  if(letters/t.length<0.45) return false;          /* mostly punctuation or digits */
+  const alpha=w=>w.replace(/[^A-Za-z]/g,'');
+  const tiny=words.filter(w=>alpha(w).length>0&&alpha(w).length<=2).length;
+  if(tiny/words.length>0.4) return false;          /* a drift of fragments */
+  const noVowel=words.filter(w=>{ const a=alpha(w); return a.length>2&&!/[aeiouyAEIOUY]/.test(a); }).length;
+  if(noVowel/words.length>0.25) return false;      /* consonant soup */
+  return true;
+}
+/* Does this answer suit this question? A policy number has a digit in it, a
+   scheme name has letters, a date parses as a date. That is enough to tell a
+   right alignment from a wrong one. */
+function fieldOk(fd,raw){
+  const t=String(raw==null?'':raw).trim();
+  if(!t) return false;
+  /* A line that ends in a colon or a question mark is announcing something,
+     not answering it — "Applicable?" and "...the following options:" are
+     headings that were being written into the MADS as answers. */
+  if(/[:：?]$/.test(t)) return false;
+  if(normValue(fd.type,t,fd.list)==null) return false;
+  /* A policy number is a reference, not a phrase: a token or two, with real
+     digits in it. Being strict here is what lets the pairing tell a right
+     alignment from a wrong one. */
+  if(fd.id==='policyNo')
+    return /\d{2,}/.test(t)&&t.length>=4&&t.length<=40&&t.split(/\s+/).length<=2;
+  if(fd.id==='name')
+    return /[A-Za-z]{3}/.test(t)&&!/^\d/.test(t)&&t.length>=5&&t.length<=90&&looksLikeProse(t);
+  if(fd.id==='nmpa'){ const n=Number(normValue('number',t)); return n>=50&&n<=75; }
+  /* A figure with no % sign and no decimal point is usually something else on
+     the page — a page number, a count of funds — that happened to sit near
+     the question. Insisting on one or the other keeps those out. */
+  if(fd.type==='percent'){
+    if(!/%/.test(t)&&!/\d\.\d/.test(t)) return false;
+    const n=Number(normValue('percent',t));
+    return n>=0&&n<=100;
+  }
+
+  if(fd.type==='money'){
+    const n=Number(normValue('money',t));
+    if(!(n>0)) return false;
+    /* An amount is written like an amount. A bare integer inside a sentence
+       is a year, a page number or an age — "2028" is not a transfer value. */
+    if(!(/[£€$]/.test(t)||/\d,\d{3}/.test(t)||/\d\.\d\d(?!\d)/.test(t))) return false;
+  }
+  /* Free text has to read like an answer, not like a reader's bad day — and a
+     one-word column heading such as "Fund" is not an answer either. */
+  if(fd.type==='long') return t.length>=10&&t.split(/\s+/).length>=2&&looksLikeProse(t);
+  if(fd.type==='text') return looksLikeProse(t);
+  return true;
+}
+
+/* "This plan offers the following retirement options:" is followed by the
+   options themselves, as bullets. The list is the answer — taking the line
+   that announces it and calling that the answer is worse than finding
+   nothing. */
+const BULLET=/^\s*[•·▪◦※\-–—*]\s*|^\s*\(?\d+[.)]\s+/;
+function pairBulletLists(lines,want,take){
+  for(let i=0;i<lines.length;i++){
+    const lab=String(lines[i]).trim();
+    if(!/[:：]$/.test(lab)||lab.length<8) continue;
+    const items=[];
+    for(let j=i+1;j<lines.length&&items.length<14;j++){
+      const t=String(lines[j]).trim();
+      if(!t) continue;
+      if(!BULLET.test(t)) break;
+      items.push(t.replace(BULLET,'').trim());
+    }
+    if(items.length<2) continue;
+    const joined=items.join('; ');
+    const bare=lab.replace(/[:：]$/,'');
+    want.forEach(fd=>{ if(looksLikeLabel(fd,bare)) take(fd,joined,'the list under "'+bare.slice(0,30)+'"',bare); });
+  }
+}
+/* A very common provider layout: a stack of questions each ending in a colon,
+   then the answers underneath in the same order.
+
+       Policy start date:            Confidential          <- page furniture
+       Current value:                04/05/2022
+       Transfer value:               E78,800.18
+                                     E78,799.84
+
+   The colon is a much stronger signal than "this line looks like a heading",
+   and it survives an answer that runs to a paragraph. As with the other
+   pairing, the offset is chosen by seeing which answers fit their questions
+   rather than assuming the two lists start level. */
+function pairColonLabels(lines,want,take){
+  /* Only a line that is *nothing but* a page number counts as furniture —
+     matching anything that merely starts with a digit threw away "60 years",
+     "04/05/2022" and every amount on the page. */
+  const furniture=/^(confidential|private and confidential|continued)/i;
+  const pageNo=/^(page\s*)?\d{1,3}$/i;
+  for(let i=0;i<lines.length;i++){
+    let a=i;
+    while(a<lines.length&&/:$/.test(String(lines[a]).trim())&&String(lines[a]).trim().length>3) a++;
+    const labels=lines.slice(i,a).map(x=>String(x).trim().replace(/:$/,''));
+    if(labels.length<3){ i=Math.max(i,a-1); continue; }
+    /* the answers that follow, ignoring the page's own furniture */
+    const vals=[];
+    for(let b=a;b<lines.length&&vals.length<labels.length+4;b++){
+      const t=String(lines[b]).trim();
+      if(!t) continue;
+      if(/:$/.test(t)&&t.length>3) break;            /* the next block of questions */
+      if(furniture.test(t)||pageNo.test(t)) continue;
+      vals.push(t);
+    }
+    if(vals.length<2){ i=a-1; continue; }
+    let best=null;
+    for(let shift=0;shift<=3;shift++){
+      let score=0,hits=0;
+      labels.forEach((lab,k)=>{
+        const vi=k+shift;
+        want.forEach(fd=>{
+          if(!looksLikeLabel(fd,lab)) return;
+          if(vi>=vals.length){ score-=2; return; }
+          if(fieldOk(fd,vals[vi])){ score+=2; hits++; } else score-=1;
+        });
+      });
+      if(hits>=1&&(!best||score>best.score)) best={shift,score};
+    }
+    if(best&&best.score>0){
+      labels.forEach((lab,k)=>{
+        const vi=k+best.shift;
+        if(vi>=vals.length) return;
+        want.forEach(fd=>{
+          if(looksLikeLabel(fd,lab)&&fieldOk(fd,vals[vi]))
+            take(fd,vals[vi],'the answer under "'+lab.slice(0,28)+'"',lab);
+        });
+      });
+    }
+    i=a-1;
+  }
+}
+/* A run of label lines followed by a run of answer lines, read down one
+   column then the other. Headings and wrapped labels knock the two lists out
+   of step, so rather than assume they line up we try every split and every
+   small shift and keep whichever makes the answers fit their questions. */
+function pairColumns(lines,want,take){
+  const junk=/^(page \d|tel:|www\.|http|registered (in|office)|authorised|firm reference|member of the)/i;
+  for(let i=0;i<lines.length;i++){
+    let a=i;
+    while(a<lines.length&&a-i<40&&blockish(lines[a])&&!junk.test(lines[a])) a++;
+    const run=lines.slice(i,a);
+    if(run.length<4){ i=Math.max(i,a-1); continue; }
+    let best=null;
+    for(let s=2;s<run.length-1;s++){
+      const labels=run.slice(0,s), vals=run.slice(s);
+      for(let shift=0;shift<=3;shift++){
+        let score=0,hits=0;
+        labels.forEach((lab,k)=>{
+          const vi=k-shift;
+          want.forEach(fd=>{
+            if(!looksLikeLabel(fd,lab)) return;
+            /* a shift that pushes a question past the end of the answers is
+               not a better fit for having dodged the question */
+            if(vi<0||vi>=vals.length){ score-=2; return; }
+            if(fieldOk(fd,vals[vi])){ score+=2; hits++; } else score-=1;
+          });
+        });
+        if(hits>=2&&(!best||score>best.score)) best={s,shift,score,labels,vals};
+      }
+    }
+    if(best&&best.score>0){
+      best.labels.forEach((lab,k)=>{
+        const vi=k-best.shift;
+        if(vi<0||vi>=best.vals.length) return;
+        want.forEach(fd=>{
+          if(looksLikeLabel(fd,lab)&&fieldOk(fd,best.vals[vi]))
+            take(fd,best.vals[vi],'paired by position, line '+(i+best.s+vi+1),lab);
+        });
+      });
+    }
+    i=a-1;
+  }
+}
+
+/* ------------------------------------------------------------------------ */
+/* The panel on the Recommendation section                                   */
+/* ------------------------------------------------------------------------ */
+/* The Reco sheet gives each ceding pension a column of its own: the first is
+   column B, the second C, and so on to K for the tenth. Anything after the
+   tenth has nowhere to go, so say so rather than dropping it silently. */
+let RECO_OPEN=null;   /* the pension to show open after answers are saved */
+function recoCol(i){ return i<10?String.fromCharCode(66+i):null; }
+function recoPensionCard(c,p,i){
+  const cols=(sectionById('dcPensions').cols||[]).filter(x=>x.reco);
+  const done=cols.filter(x=>p[x.id]!=null&&p[x.id]!=='').length;
+  const col=recoCol(i);
+  const openIt=RECO_OPEN?(p._id===RECO_OPEN):(i===0);
+  return '<details class="fblock" style="border-top:1px solid var(--line-2)"'+(openIt?' open':'')+'>'
+    +'<summary><span class="fb-t">'+esc(p.name||('Pension '+(i+1)))
+    +(p.policyNo?' <span class="tiny muted mono">'+esc(p.policyNo)+'</span>':'')+'</span>'
+    +'<span class="bdg '+(col?'mut':'warn')+'">'+(col?'MADS column '+col:'no column left')+'</span>'
+    +'<span class="bdg '+(done===cols.length?'ok':done?'warn':'mut')+'">'+done+'/'+cols.length+'</span>'
+    +ic('chevD',15)+'</summary>'
+    +(col?'':'<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div>The Reco sheet has ten '
+      +'columns for ceding pensions and this is number '+(i+1)+', so it will not reach the MADS. Move it above '
+      +'one of the others, or record it separately.</div></div>')
+    +'<div class="row wrapf" style="gap:7px;margin-bottom:10px">'
+    +'<button class="btn sm" data-a="recoRead" data-v="'+esc(p._id)+'">'+ic('up',14)+' Read a document for this one</button>'
+    +'<span class="tiny muted">Value '+esc(money(p.value,p.ccy||'GBP'))
+    +(p.tvq?' · transfer value '+esc(money(p.tvq,p.ccy||'GBP')):'')+'</span></div>'
+    +fieldsGrid(cols,p,'ROW|dcPensions|'+p._id)
+    +'</details>';
+}
+/* What the practice has taught the reader, and a way to take it back. */
+function learnedPanel(){
+  const rules=learnedRules();
+  if(!rules.length) return '';
+  const fld=id=>{ const f=schemeField(id); return f?f.label:id; };
+  const rows=rules.slice().sort((a,b)=>(b.at||'').localeCompare(a.at||''));
+  return '<details class="fblock" style="border-top:1px solid var(--line-2)">'
+    +'<summary><span class="fb-t">What the reader has learned from your corrections</span>'
+    +'<span class="bdg mut">'+rules.length+'</span>'+ic('chevD',15)+'</summary>'
+    +'<div class="hint" style="margin:0 0 10px">Every time you correct an answer on the review screen it is kept '
+    +'here and used on the next document. Shared with everyone in the practice.</div>'
+    +'<div class="tw" style="max-height:260px;overflow:auto"><table class="t">'
+    +'<thead><tr><th>When a document says</th><th>Read it as</th><th style="width:90px">Used</th>'
+    +'<th style="width:40px"></th></tr></thead><tbody>'
+    +rows.map((r,i)=>'<tr><td class="tiny">'+(r.kind==='never'?'<span style="color:var(--risk)">not</span> ':'')
+      +'“'+esc(r.label)+'”</td>'
+      +'<td class="tiny">'+esc(fld(r.field))+'</td>'
+      +'<td class="tiny muted2">'+(r.seen||1)+'×'+(r.at?' · '+esc(fdateS(r.at)):'')+'</td>'
+      +'<td><button class="btn xs ghost" data-a="learnDel" data-v="'+esc(ruleKey(r.label)+'|'+r.field+'|'+r.kind)
+      +'" title="Forget this">'+ic('trash',13)+'</button></td></tr>').join('')
+    +'</tbody></table></div></details>';
+}
+function recoPanel(c){
+  const list=c.data.dcPensions||[];
+  let h='<div class="card mt"><div class="card-h"><span style="color:var(--blue)">'+ic('pig',18)+'</span>'
+    +'<div style="min-width:0"><h3>Ceding pensions — for the MADS Reco sheet</h3>'
+    +'<div class="sub">What the provider told us in reply to the letter of authority. Admin needs these to '
+    +'process the application. Each pension fills its own column on the Reco sheet, in this order — the first '
+    +'is column B, the second C, and so on to K.</div></div></div><div class="card-b">';
+  if(!list.length){
+    h+='<div class="note info"><span class="ic">'+ic('info',15)+'</span><div>No DC pensions recorded yet. Add them '
+      +'under <b>DC pensions, SIPP &amp; QROPS</b> — or upload the providers’ replies here and I will create one '
+      +'pension per document from what they say.</div></div>'
+      +'<div class="row wrapf mt" style="gap:7px">'
+      +'<button class="btn sm pri" data-a="recoRead" data-v="">'+ic('up',14)+' Read the providers’ replies</button>'
+      +'<button class="btn sm" data-a="sect" data-v="dcPensions">Go to DC pensions</button></div>';
+  } else {
+    h+='<div class="row wrapf" style="gap:7px;margin-bottom:6px">'
+      +'<button class="btn sm pri" data-a="recoRead" data-v="">'+ic('up',14)+' Read the providers’ replies</button>'
+      +'<span class="tiny muted">Upload all of them at once — a reply, a TVQ, a scheme questionnaire, from each '
+      +'provider. Word, PDF, Excel or text.</span></div>';
+    list.forEach((p,i)=>{ h+=recoPensionCard(c,p,i); });
+  }
+  h+=learnedPanel();
+  h+='</div></div>';
+  return h;
+}
+/* hang it under the Recommendation section, after whatever ws.html added */
+const _extraPanelReco=extraPanel;
+extraPanel=function(c,s){
+  const prev=_extraPanelReco(c,s);
+  if(s.id==='recommendation') return prev+recoPanel(c);
+  return prev;
+};
+/* The reader lives on the Recommendation section, but a provider's reply
+   arrives while you are looking at the pensions themselves — so offer it
+   there too rather than making it something you have to know about. */
+const _rowsTableReco=rowsTable;
+rowsTable=function(c,s){
+  const h=_rowsTableReco(c,s);
+  if(s.id!=='dcPensions') return h;
+  const btn='<button class="btn sm pri" data-a="recoRead" data-v="">'+ic('up',14)
+    +' Read the providers’ replies</button>'
+    +'<span class="tiny muted" style="margin-left:9px">Upload a TVQ or scheme reply from each provider — '
+    +'I read them and fill in the scheme questions.</span>';
+  /* the empty state has its own button row; the table has a footer row */
+  if(h.indexOf('data-a="rowAdd"')<0) return h;
+  return h.replace('<button class="btn sm" data-a="rowAdd"',btn+'<button class="btn sm" data-a="rowAdd"');
+};
+
+/* ------------------------------------------------------------------------ */
+/* Reading a document, and approving what it found                           */
+/* ------------------------------------------------------------------------ */
+function recoTargets(c){ return (c.data.dcPensions||[]); }
+function recoReadModal(c,pid){
+  const list=recoTargets(c);
+  let h=mHead(pid?'Read a document for this pension':'Read the providers’ replies',
+    'Pick as many documents as you like — a consolidation usually means one from each provider. I read each in '
+    +'turn and work out which pension it belongs to. Nothing is saved until you have seen what I found.');
+  h+='<div class="m-b">'
+    +(pid?'<input type="hidden" id="recoWho" value="'+esc(pid)+'">':'')
+    +'<div class="field"><label class="lbl">The documents <span class="req">*</span></label>'
+    +'<input type="file" class="inp" id="recoFile" multiple accept=".docx,.pdf,.xlsx,.xlsm,.csv,.txt,.md"></div>'
+    +(pid?'':'<div class="note mut"><span class="ic">'+ic('info',15)+'</span><div>Each document is matched to a '
+      +'pension by its policy number first, then by the scheme name. Anything that matches nothing is offered as a '
+      +'new pension — and you can change the choice for any of them before saving.</div></div>')
+    +'<div class="note mut mt"><span class="ic">'+ic('file',15)+'</span><div>Word documents and spreadsheets read '
+    +'best, because the question and its answer sit in neighbouring cells. A PDF works when it holds real text; a '
+    +'scanned one holds only a picture and there is nothing to read.</div></div>'
+    +'</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn pri" data-a="recoReadGo">'+ic('search',14)+' Read them</button></div>';
+  openModal(h);
+}
+/* --------------------- which pension is this document about? -------------- */
+function keyish(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
+/* Scheme names are written a dozen ways — "Aviva Personal Pension" against
+   "Aviva Pension Plan". Shared words, minus the ones every scheme uses. */
+const NAME_NOISE={pension:1,pensions:1,plan:1,plans:1,scheme:1,personal:1,retirement:1,account:1,fund:1,
+  the:1,of:1,and:1,ltd:1,limited:1,plc:1,uk:1,group:1,company:1,plc$:1,plans$:1};
+function nameScore(a,b){
+  const tok=s=>String(s||'').toLowerCase().split(/[^a-z0-9]+/).filter(w=>w.length>1&&!NAME_NOISE[w]);
+  const A=tok(a), B=tok(b);
+  if(!A.length||!B.length) return 0;
+  const shared=A.filter(w=>B.indexOf(w)>=0).length;
+  return shared/Math.min(A.length,B.length);
+}
+function matchPension(c,found){
+  const list=c.data.dcPensions||[];
+  const pol=keyish((found.policyNo||{}).value), nm=(found.name||{}).value;
+  /* a policy number is unambiguous — take it and stop looking */
+  if(pol){
+    const hit=list.find(p=>keyish(p.policyNo)&&keyish(p.policyNo)===pol);
+    if(hit) return {pid:hit._id,how:'policy number '+hit.policyNo,sure:1};
+  }
+  let best=null;
+  list.forEach(p=>{
+    const s=nameScore(nm,p.name);
+    if(s>0&&(!best||s>best.s)) best={p,s};
+  });
+  if(best&&best.s>=0.5) return {pid:best.p._id,how:'the scheme name looks like “'+best.p.name+'”',sure:best.s>=0.99?1:0};
+  return {pid:'__new',how:nm?'nothing on file matches “'+nm+'”':'I could not find a scheme name in it',sure:0};
+}
+/* One editable cell in the review table — the adviser can correct anything
+   before it is written to the record. `k` is document index + field index, so
+   several documents can be on screen together without their inputs colliding. */
+function recoEditor(fd,val,k){
+  const at=' data-reco-val="'+k+'"';
+  if(fd&&fd.type==='choice') return '<select class="sel"'+at+'>'+optsHTML(fd.list,val)+'</select>';
+  if(fd&&fd.type==='long') return '<textarea class="ta" rows="2"'+at+'>'+esc(val)+'</textarea>';
+  const t=fd&&(fd.type==='money'||fd.type==='percent'||fd.type==='number')?'number':(fd&&fd.type==='date'?'date':'text');
+  return '<input class="inp" type="'+t+'"'+(t==='number'?' step="any"':'')+at+' value="'+esc(val)+'">';
+}
+/* One document's worth of answers, folded up under its file name. */
+function recoDocBlock(c,d,di){
+  /* The one thing worth doing about a document with no text: read it here. */
+  /* Reading the pages themselves is worth offering on any PDF, not only one
+     that came back empty — a document can hand over three answers from its
+     text layer while the other nineteen sit in a picture. */
+  const ocrBtn=(di,d,hit)=>{
+    if(d.ocrRunning) return '<div class="row wrapf mt" style="gap:8px;align-items:center">'
+      +'<span class="spin"></span><span class="tiny b7" id="ocrnote-'+di+'">'+esc(d.ocrNote||'working…')+'</span>'
+      +'<button class="btn sm ghost sp" data-a="ocrStop">Stop</button></div>';
+    if(d.ocrDone) return '<div class="tiny muted mt">Read here with OCR'
+      +(d.ocrPages?' — '+d.ocrPages+' page'+(d.ocrPages===1?'':'s'):'')+'.</div>';
+    const why=hit
+      ? 'It found '+hit+' from the text in this file. Reading the pages as pictures often finds more, '
+        +'because most of a quotation is printed rather than typed.'
+      : 'Turns each page back into a picture and reads it.';
+    return '<div class="row wrapf mt" style="gap:8px;align-items:center">'
+      +'<button class="btn sm '+(hit?'':'pri')+'" data-a="ocrDoc" data-v="'+di+'">'+ic('search',14)
+      +' Read the pages with OCR</button>'
+      +'<span class="tiny muted" style="min-width:0">'+why+' Stays on this computer. The first run downloads '
+      +'the reader; it reads several pages at once and shows what it finds as it goes.</span></div>'
+      +(d.ocrFailed?'<div class="tiny mt" style="color:var(--risk)">Last try failed: '+esc(d.ocrFailed)
+        +'. If your network blocks the download, use the <b>Scanned TVQ reader</b> in your project folder instead.</div>':'');
+  };
+
+  const rows=d.rows||[];
+  const hit=rows.filter(r=>r.value!=null&&r.value!=='').length;
+  const list=c.data.dcPensions||[];
+  const many=(S.flow.docs||[]).length>1;
+  let h='<details class="fblock"'+(!many||di===0||!hit?' open':'')+'>'
+    +'<summary><span class="fb-t">'+esc(d.fileName)+'</span>'
+    +'<span class="bdg '+(hit?'ok':'warn')+'">'+hit+'/'+rows.length+'</span>'+ic('chevD',15)+'</summary>';
+  /* where it is going */
+  h+='<div class="row wrapf" style="gap:8px;align-items:center;margin:0 0 10px">'
+    +'<span class="tiny muted" style="flex:0 0 auto">Goes to</span>'
+    +'<select class="sel" data-reco-target="'+di+'" style="max-width:320px">'
+    +list.map(p=>'<option value="'+esc(p._id)+'"'+(p._id===d.pid?' selected':'')+'>'+esc(p.name||'Untitled pension')
+      +(p.policyNo?' — '+esc(p.policyNo):'')+'</option>').join('')
+    +'<option value="__new"'+(d.pid==='__new'?' selected':'')+'>+ Add as a new pension</option></select>'
+    +'<span class="tiny '+(d.sure?'muted':'')+'" style="min-width:0'+(d.sure?'':';color:var(--warn-ink)')+'">'
+    +(d.sure?ic('check',12)+' matched on ':'')+esc(d.how)+'</span></div>';
+  if(!hit){
+    h+=d.thin
+      ?'<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div><b>The pages are pictures.</b> '
+        +'This one does carry a little text — the address and the page numbers — but the quotation itself is an '
+        +'image on every page'+(d.images?' ('+d.images+' of them)':'')+', so none of the scheme answers are '
+        +'readable. Put it through the <b>Scanned TVQ reader</b> in your project folder and upload the .txt it '
+        +'writes, or read the pages here with the button below.</div></div>'
+      :d.scanned
+      ?'<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div><b>This is a scan.</b> Every page '
+        +'is a picture'+(d.images?' ('+d.images+' of them)':'')+' with no text behind it, so there is nothing for me '
+        +'— or for the assistant — to read. It needs putting through OCR first. The <b>Scanned TVQ reader</b> '
+        +'in your project folder does it on your own machine and writes a .txt beside each PDF; upload those '
+        +'instead — or read the pages here with the button below.</div></div>'
+      :'<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div>I could not find any of the scheme '
+        +'questions in this one — the words it uses may be ones I do not recognise yet. Tell me what it says and '
+        +'I will teach it.</div></div>';
+  }
+  if(d.kind==='PDF') h+=ocrBtn(di,d,hit);
+  if(d.ocr) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div><b>Read by OCR.</b> '
+    +'Check every figure against the document before you save it — a scanner reads the £ sign as an E or a 2 '
+    +'more often than it reads it correctly, so an amount can come out ten times too big.</div></div>';
+  const target=list.find(x=>x._id===d.pid);
+  h+='<div class="tw" style="max-height:300px;overflow:auto"><table class="t">'
+    +'<thead><tr><th style="width:30px"></th><th>Question</th><th>Answer</th>'
+    +'<th style="width:110px">Found in</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    const fd=schemeField(r.id);
+    const has=r.value!=null&&r.value!=='';
+    const k=di+'.'+i;
+    /* If the pension already holds something different, say so — replacing
+       what the adviser typed should never happen quietly. */
+    const now=target?target[r.id]:null;
+    const replacing=has&&now!=null&&now!==''&&String(now)!==String(r.value);
+    h+='<tr><td>'+(has?'<input type="checkbox" data-reco-use="'+k+'" checked>':'')+'</td>'
+      +'<td class="tiny">'+esc(fd?fd.label:r.id)+'</td>'
+      +'<td>'+(has?recoEditor(fd,r.value,k):'<span class="muted2 tiny">not found</span>')
+      +(replacing?'<div class="tiny" style="color:var(--warn-ink);margin-top:3px">replaces '
+        +esc(String(now).slice(0,60))+(String(now).length>60?'…':'')+'</div>':'')+'</td>'
+      +'<td class="tiny muted2">'+esc(r.where||'')
+      +(r.weak?'<div class="tiny" style="color:var(--warn-ink)">a guess — tick it if it is right</div>':'')
+      +'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  if((d.missing||[]).length&&!d.aiTried&&!d.scanned&&!d.thin)
+    h+='<div class="mt"><button class="btn sm" data-a="recoAskAI" data-v="'+di+'">'+ic('leaf',14)
+      +' Ask the assistant for the '+d.missing.length+' it missed</button></div>';
+  return h+'</details>';
+}
+function recoResultModal(){
+  const f=S.flow||{}, docs=f.docs||[];
+  const c=getClient(S.clientId);
+  if(!c) return;
+  const hit=docs.reduce((n,d)=>n+(d.rows||[]).filter(r=>r.value!=null&&r.value!=='').length,0);
+  const fresh=docs.filter(d=>d.pid==='__new'&&(d.rows||[]).some(r=>r.value!=null&&r.value!=='')).length;
+  let h=mHead(docs.length===1?'What I found in '+docs[0].fileName:'What I found in '+docs.length+' documents',
+    hit+' answer'+(hit===1?'':'s')+' across '+docs.length+' document'+(docs.length===1?'':'s')
+    +(fresh?' · '+fresh+' would be added as new pensions':''));
+  h+='<div class="m-b">';
+  /* two documents pointing at one pension is nearly always a mis-match */
+  const by={}; docs.forEach(d=>{ if(d.pid!=='__new') by[d.pid]=(by[d.pid]||0)+1; });
+  const clash=Object.keys(by).filter(k=>by[k]>1);
+  if(clash.length) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div>More than one '
+    +'document is pointing at the same pension, so the later one would overwrite the earlier. Change one of them '
+    +'below before you save.</div></div>';
+  if(f.failed&&f.failed.length) h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span>'
+    +'<div><b>'+f.failed.length+' could not be opened:</b> '+esc(f.failed.map(x=>x.name+' — '+x.why).join(' · '))+'</div></div>';
+  h+=docs.map((d,i)=>recoDocBlock(c,d,i)).join('');
+  if(docs.some(d=>d.aiTried)) h+='<div class="note info mt"><span class="ic">'+ic('info',15)+'</span><div>Rows '
+    +'marked <i>assistant</i> were read by the AI rather than matched directly. Check them against the document '
+    +'before you accept them.</div></div>';
+  const busy=docs.some(d=>d.ocrRunning);
+  h+='</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +(busy
+      ?'<span class="tiny muted sp">still reading — the button comes back when it finishes</span>'
+      :'<button class="btn pri" data-a="recoApply">'+ic('check',14)+' Use these answers</button>')+'</div>';
+  openModal(h,1);
+}
+/* Sending a document to a different pension changes what it would overwrite,
+   so redraw to keep the "replaces …" notes true. Delegated, because the modal
+   is rebuilt from scratch every time. */
+document.addEventListener('change',e=>{
+  const el=e.target;
+  if(el&&el.dataset&&el.dataset.recoTarget!=null&&S.flow&&S.flow.docs){
+    recoSyncFromDom(); recoResultModal();
+  }
+});
+/* Keep whatever the adviser has changed on screen, so redrawing the modal
+   (after asking the assistant, say) does not throw their edits away. */
+function recoSyncFromDom(){
+  const f=S.flow||{}; if(!f.docs) return;
+  f.docs.forEach((d,di)=>{
+    const t=document.querySelector('[data-reco-target="'+di+'"]');
+    if(t) d.pid=t.value;
+    (d.rows||[]).forEach((r,i)=>{
+      const k=di+'.'+i;
+      const inp=document.querySelector('[data-reco-val="'+k+'"]');
+      const ck=document.querySelector('[data-reco-use="'+k+'"]');
+      if(inp) r.value=inp.value;
+      if(ck) r.use=ck.checked;
+      else if(r.value==null||r.value==='') r.use=false;
+    });
+  });
+}
+Object.assign(ACT,{
+  /* Read a document that has no text in it, here in the browser. */
+  async ocrDoc(v){
+    recoSyncFromDom();
+    const f=S.flow||{}; const di=+v; const d=(f.docs||[])[di];
+    if(!d||!d.file) return;
+    OCR_STOP=false;
+    d.ocrRunning=true; d.ocrNote='getting the reader ready…';
+    recoResultModal();
+    try{
+      const res=await ocrPdf(d.file,(p,t,sofar)=>{
+        /* count what has been answered so far, so the adviser can stop
+           the moment the questions they need are filled in */
+        let got=0;
+        try{
+          const lines=[];
+          sofar.forEach(x=>String(x).split(String.fromCharCode(10)).forEach(l=>{
+            const t2=l.replace(/\s+/g,' ').trim(); if(t2) lines.push(t2); }));
+          got=Object.keys(extractScheme({lines:lines,tables:[]})).length;
+        }catch(e){}
+        d.ocrNote='page '+p+' of '+t+' read'+(got?' · '+got+' answers so far':'');
+        const el=$('#ocrnote-'+di);
+        if(el) el.textContent=d.ocrNote;
+      });
+      const doc={lines:res.lines,tables:[],kind:'PDF',ocr:true};
+      const found=extractScheme(doc);
+      /* Add to what the file's own text already gave us rather than replacing
+         it: a typed value is more trustworthy than a read one, so anything
+         already answered stays, and OCR fills the gaps. */
+      let added=0;
+      const before=(d.rows||[]).filter(r=>r.value!=null&&r.value!=='').length;
+      const rows=SCHEME_FIELDS.filter(x=>x.id!=='dcReco').map(x=>{
+        const had=(d.rows||[]).find(r=>r.id===x.id);
+        if(had&&had.value!=null&&had.value!=='') return had;
+        const g=found[x.id];
+        if(g) added++;
+        return {id:x.id,value:g?g.value:null,where:g?('OCR · '+g.where):'',use:!!g&&!g.weak,
+          weak:!!(g&&g.weak),label:g?g.label:null,proposed:g?g.value:null,fromOcr:!!g};
+      });
+      d.rows=rows;
+      d.missing=d.rows.filter(r=>r.value==null||r.value==='').map(r=>r.id);
+      d.text=res.lines.join('\n');
+      d.ocr=true; d.scanned=false; d.thin=false; d.ocrDone=true;
+      d.ocrPages=res.pages;
+      /* now we may know the scheme, so work out where it should go */
+      const c=getClient(S.clientId);
+      if(c&&d.pid==='__new'){
+        const m=matchPension(c,found);
+        d.pid=m.pid; d.how=m.how; d.sure=m.sure;
+      }
+      const hit=d.rows.filter(r=>r.value!=null&&r.value!=='').length;
+      d.ocrRunning=false;
+      recoResultModal();
+      toast(added?'OCR added '+added+' answer'+(added===1?'':'s'):'OCR found nothing new',
+        added?(hit+' of 22 now answered. Check the figures — OCR misreads the £ sign more often '
+          +'than anything else.')
+           :'The pages were read but they do not answer any of the questions that were still empty.',
+        added?'ok':'warn',9000);
+    }catch(e){
+      d.ocrRunning=false; d.ocrFailed=e.message;
+      recoResultModal();
+      toast('Could not read it',e.message,'risk',9000);
+    }
+  },
+  learnDel(v){
+    const parts=String(v).split("|");
+    const rules=learnedRules();
+    const i=rules.findIndex(r=>ruleKey(r.label)===parts[0]&&r.field===parts[1]&&r.kind===parts[2]);
+    if(i<0) return;
+    const gone=rules.splice(i,1)[0];
+    save(); render();
+    toast("Forgotten","“"+gone.label+"” is no longer read as that question.");
+  },
+  ocrStop(){ OCR_STOP=true; toast('Stopping','It will finish the page it is on.'); },
+  recoRead(v){ const c=getClient(S.clientId); if(!c) return; recoReadModal(c,v||''); },
+  async recoReadGo(){
+    const c=getClient(S.clientId); if(!c) return;
+    const forced=(($('#recoWho')||{}).value)||'';
+    const files=[...(($('#recoFile')||{}).files||[])];
+    if(!files.length){ toast('Choose the documents','Pick the files the providers sent.','warn'); return; }
+    toast('Reading '+files.length+' document'+(files.length===1?'':'s'),'Looking for the scheme questions…');
+    const docs=[], failed=[];
+    for(const file of files){
+      let doc;
+      try{ doc=await readDocument(file); }
+      catch(e){ failed.push({name:file.name,why:e.message}); continue; }
+      const found=extractScheme(doc);
+      const rows=SCHEME_FIELDS.filter(fd=>fd.id!=='dcReco').map(fd=>{
+        const g=found[fd.id];
+        return {id:fd.id,value:g?g.value:null,where:g?g.where:'',use:!!g&&!g.weak,
+          weak:!!(g&&g.weak),label:g?g.label:null,proposed:g?g.value:null};
+      });
+      const m=forced?{pid:forced,how:'you chose this pension',sure:1}:matchPension(c,found);
+      docs.push({fileName:file.name,kind:doc.kind,scanned:!!doc.scanned,thin:!!doc.thin,images:doc.images||0,ocr:!!doc.ocr,
+        file:file,
+        rows,pid:m.pid,how:m.how,sure:m.sure,
+        text:(doc.lines||[]).join('\n')+'\n'+(doc.tables||[]).map(t=>t.map(r=>r.join(' | ')).join('\n')).join('\n'),
+        missing:rows.filter(r=>r.value==null||r.value==='').map(r=>r.id)});
+    }
+    if(!docs.length){
+      toast('Could not read '+(failed.length===1?'it':'any of them'),
+        failed.map(x=>x.name+': '+x.why).join(' · '),'risk',9000);
+      return;
+    }
+    S.flow={mode:'recoFound',docs,failed};
+    recoResultModal();
+  },
+  async recoAskAI(v){
+    recoSyncFromDom();
+    const f=S.flow||{}; const d=(f.docs||[])[+v]; if(!d) return;
+    const want=(d.missing||[]).map(id=>{ const fd=schemeField(id); return fd?{id,ask:fd.ask}:null; })
+      .filter(x=>x&&!/^omit/.test(x.ask));
+    if(!want.length){ toast('Nothing left to ask','Every question already has an answer.'); return; }
+    toast('Asking the assistant','Reading '+d.fileName+' for what is left…');
+    try{
+      const r=await api('POST','/api/ai',{kind:'schemeExtract',facts:String(d.text||'').slice(0,24000),want});
+      let obj=null;
+      const t=String(r.text||'').replace(/^```(json)?|```$/g,'').trim();
+      try{ obj=JSON.parse(t); }
+      catch(e){ const m=/\{[\s\S]*\}/.exec(t); if(m){ try{ obj=JSON.parse(m[0]); }catch(e2){} } }
+      if(!obj||typeof obj!=='object'){ toast('No luck','The assistant did not return anything I could use.','warn'); return; }
+      let added=0;
+      d.rows.forEach(row=>{
+        if(row.value!=null&&row.value!=='') return;
+        const fd=schemeField(row.id); if(!fd) return;
+        const v2=normValue(fd.type,obj[row.id],fd.list);
+        if(v2===null||v2==='') return;
+        row.value=v2; row.where='assistant'; row.use=true; added++;
+      });
+      d.aiTried=true; d.missing=d.rows.filter(x=>x.value==null||x.value==='').map(x=>x.id);
+      recoResultModal();
+      toast(added?'Found '+added+' more in '+d.fileName:'Nothing more found',
+        added?'Check them against the document before you accept them.':'The document does not seem to answer the rest.');
+    }catch(e){ toast('Could not ask the assistant',e.message,'warn',8000); }
+  },
+  recoApply(){
+    const c=getClient(S.clientId); if(!c) return;
+    recoSyncFromDom();
+    const f=S.flow||{}; const docs=f.docs||[]; if(!docs.length) return;
+    let written=0, touchedNames=[], addedPensions=0, lastPid=null;
+    docs.forEach(d=>{
+      const vals={};
+      (d.rows||[]).forEach(r=>{ if(r.use&&r.value!==''&&r.value!=null) vals[r.id]=r.value; });
+      if(!Object.keys(vals).length) return;
+      let p=(c.data.dcPensions||[]).find(x=>x._id===d.pid);
+      if(!p){
+        p={_id:uid('r'),owner:'Applicant 1'};
+        c.data.dcPensions=(c.data.dcPensions||[]).concat([p]);
+        addedPensions++;
+      }
+      Object.keys(vals).forEach(k=>{ p[k]=vals[k]; });
+      if(!p.name) p.name='Pension from '+d.fileName;
+      written+=Object.keys(vals).length;
+      touchedNames.push(p.name);
+      lastPid=p._id;
+    });
+    /* keep what the adviser corrected, so the next document reads better */
+    let taught=0;
+    docs.forEach(d=>{ taught+=learnFromReview(d); });
+    if(!written){
+      const any=docs.some(d=>(d.rows||[]).some(r=>r.value!=null&&r.value!==''));
+      toast(any?'Nothing is ticked':'There is nothing to save yet',
+        any?'Tick the answers you want to keep, then press it again.'
+           :'No answers were found in these documents. Read them with OCR first, or type the answers in by hand.',
+        'warn',8000);
+      return;
+    }
+    touch(c);
+    /* Land on the Recommendation section with the pension that received the
+       answers opened, so it is never a question of where they went. */
+    S.section='recommendation';
+    RECO_OPEN=lastPid;
+    dismissModal(); render();
+    toast(written+' answers saved',
+      touchedNames.join(', ')+(addedPensions?' · '+addedPensions+' new pension'+(addedPensions===1?'':'s')+' added':'')
+      +' — and on to the MADS.'
+      +(taught?'  Learned '+taught+' new '+(taught===1?'wording':'wordings')+' from your corrections.':''));
+  }
+});

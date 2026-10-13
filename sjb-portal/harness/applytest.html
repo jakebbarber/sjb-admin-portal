@@ -1,0 +1,81 @@
+<!doctype html><meta charset="utf-8"><title>apply-after-OCR test</title>
+<script>
+window.__runApply=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-25',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={firstName:'Apply',surname:'Case'};
+    c.data.dcPensions=[];                       /* nothing on file — as in the screenshot */
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+    S.clientId=c.id; S.screen='client'; S.section='recommendation';
+
+    /* 1. upload a document that yields nothing, exactly as happened */
+    const f=new File([await (await ORIG('/rq.pdf')).blob()],'Retirement Quotation.pdf');
+    ACT.recoRead('');
+    const dt=new DataTransfer(); dt.items.add(f);
+    document.querySelector('#recoFile').files=dt.files;
+    await ACT.recoReadGo();
+    const d=(S.flow.docs||[])[0];
+    say('after upload: answers='+(d.rows||[]).filter(r=>r.value!=null&&r.value!=='').length+'  pid='+d.pid);
+
+    /* 2. stand in for the OCR result — the same shape ocrDoc produces */
+    const ocrText=await (await ORIG('/tvq_ocr.txt')).text();
+    const doc={lines:ocrText.split('\n').map(x=>x.trim()).filter(Boolean),tables:[],kind:'PDF',ocr:true};
+    const found=extractScheme(doc);
+    d.rows=SCHEME_FIELDS.filter(x=>x.id!=='dcReco').map(x=>{
+      const g=found[x.id];
+      return {id:x.id,value:g?g.value:null,where:g?g.where:'',use:!!g};
+    });
+    d.missing=d.rows.filter(r=>r.value==null||r.value==='').map(r=>r.id);
+    d.ocr=true; d.scanned=false; d.thin=false;
+    const m=matchPension(c,found); d.pid=m.pid; d.how=m.how; d.sure=m.sure;
+    recoResultModal();
+    const hit=d.rows.filter(r=>r.value!=null&&r.value!=='').length;
+    say('after OCR: answers='+hit+'  pid='+d.pid);
+
+    /* 3. how many modal roots exist, and are the checkboxes reachable? */
+    say('#modal elements in the document: '+document.querySelectorAll('#modal').length);
+    const boxes=document.querySelectorAll('[data-reco-use]');
+    say('checkboxes rendered: '+boxes.length+'  checked: '+[...boxes].filter(b=>b.checked).length);
+    ok(boxes.length===hit,'  a checkbox for each answer');
+
+    /* 4. press the button the way the adviser does */
+    const btn=[...document.querySelectorAll('#modal [data-a]')].find(b=>b.dataset.a==='recoApply');
+    ok(!!btn,'  the "Use these answers" button exists');
+    if(btn) btn.click();
+    await new Promise(r=>setTimeout(r,300));
+
+    const cc=DB.clients.find(x=>x.id===c.id);
+    const pens=cc.data.dcPensions||[];
+    say('pensions on the client afterwards: '+pens.length);
+    ok(pens.length===1,'  a pension was created');
+    if(pens[0]){
+      const filled=Object.keys(pens[0]).filter(k=>k!=='_id'&&pens[0][k]!==''&&pens[0][k]!=null);
+      say('  fields written: '+filled.join(', '));
+      ok(filled.length>=hit,'  every ticked answer was written ('+filled.length+' >= '+hit+')');
+      ok(String(pens[0].policyNo||'')==='95768400','  policy number written');
+    }
+    ok(document.querySelectorAll('#modal').length===0||!document.querySelector('[data-reco-use]'),
+       '  the dialog closed afterwards');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

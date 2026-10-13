@@ -1,0 +1,165 @@
+<!doctype html><meta charset="utf-8"><title>server logic test</title>
+<script src="/shared.js"></script>
+<script src="/app.js"></script>
+<script>
+/* In-memory store with the same contract as the Node FileStore. */
+const MEM={};
+const MemStore={
+  async get(c,id){ return (MEM[c]&&MEM[c][id])?JSON.parse(MEM[c][id]):null; },
+  async put(c,id,o){ (MEM[c]=MEM[c]||{})[id]=JSON.stringify(o); },
+  async del(c,id){ if(MEM[c]) delete MEM[c][id]; },
+  async list(c){ return Object.values(MEM[c]||{}).map(s=>JSON.parse(s)); }
+};
+const MAILS=[];
+/* A live app instance other pages can route their /api calls through. */
+window.__MEM=MEM; window.__MAILS=MAILS;
+window.__handle=SJB_APP.createApp({store:MemStore,secret:'test-secret',baseUrl:location.origin,exposeCookie:true,
+  mail:async(to,subj,text)=>{ MAILS.push({to,subj,text}); },log:()=>{}});
+window.__seedUser=async function(){ const u={id:'u-1',email:'dion@sjb-global.com',name:'Dion',hash:await SJB_APP.hashPassword('correct horse battery')}; await MemStore.put('users',u.id,u); return u.email; };
+window.__run=async function(){
+  const L=[]; const say=s=>L.push(s);
+  try{
+    const app=SJB_APP.createApp({store:MemStore,secret:'test-secret',baseUrl:'https://factfind.example',exposeCookie:true,
+      mail:async(to,subj,text)=>{ MAILS.push({to,subj,text}); },log:(...a)=>L.push('LOG '+a.join(' '))});
+    let cookie='';
+    const call=async(method,path,body,opts)=>{
+      const h=new Headers(opts&&opts.headers||{}); if(cookie) h.set('x-session',cookie);
+      if(body!=null) h.set('content-type','application/json');
+      const req=new Request('https://factfind.example'+path,{method,headers:h,body:body!=null?JSON.stringify(body):undefined});
+      const res=await app(req);
+      const sc=res.headers.get('x-session'); if(sc) cookie=sc;
+      if(path==='/api/logout') cookie='';
+      let data=null; try{ data=await res.json(); }catch(e){}
+      return {status:res.status,data};
+    };
+    // user
+    const u={id:'u-1',email:'dion@sjb-global.com',name:'Dion',hash:await SJB_APP.hashPassword('correct horse battery')};
+    await MemStore.put('users',u.id,u);
+    say('health '+(await call('GET','/api/health')).status);
+    say('state without login -> '+(await call('GET','/api/state')).status+' (expect 401)');
+    say('bad login -> '+(await call('POST','/api/login',{email:'dion@sjb-global.com',password:'wrong'})).status+' (expect 401)');
+    for(let i=0;i<4;i++) await call('POST','/api/login',{email:'dion@sjb-global.com',password:'wrong'});
+    say('6th bad login -> '+(await call('POST','/api/login',{email:'dion@sjb-global.com',password:'wrong'})).status+' (expect 429 lockout)');
+    // new key by different ip header to get past lockout for the real login
+    const okLogin=await call('POST','/api/login',{email:'dion@sjb-global.com',password:'correct horse battery'},{headers:{'x-forwarded-for':'10.0.0.2'}});
+    say('good login -> '+okLogin.status+' cookie set='+!!cookie);
+    say('me -> '+JSON.stringify((await call('GET','/api/me')).data.user));
+    // create client via state PUT
+    const client={id:'cl-1',ref:'SJB-2026-001',name:'x',status:'Awaiting client',created:new Date().toISOString(),updated:new Date().toISOString(),
+      data:{meta:{ffCurrency:'GBP',adviser:'Dion Angove',adviserEmail:'dion@sjb-global.com'},personal:{a1:{firstName:'Margaret',surname:'Ellison',email:'m@example.com'},a2:{}}}};
+    say('put state -> '+JSON.stringify((await call('PUT','/api/state',{clients:[client],requests:[],settings:{adviserName:'Dion Angove'}})).data));
+    const st=await call('GET','/api/state');
+    say('state clients='+st.data.clients.length+' inbox='+st.data.inbox.length);
+    // link
+    const link=await call('POST','/api/clients/cl-1/form');
+    say('form link -> '+link.status+' '+link.data.url);
+    const token=link.data.token;
+    const link2=await call('POST','/api/clients/cl-1/form');
+    say('second request reuses token='+(link2.data.token===token));
+    // ---- client side (no cookie) ----
+    const saved=cookie; cookie='';
+    const ctx=await call('GET','/api/form/'+token);
+    say('client GET form -> '+ctx.status+' name='+ctx.data.clientName+' first='+ctx.data.firstName+' adviser='+ctx.data.adviserName+' sections in data='+Object.keys(ctx.data.data).length);
+    say('bad token -> '+(await call('GET','/api/form/'+'x'.repeat(24))).status+' (expect 404)');
+    say('client cannot read state -> '+(await call('GET','/api/state')).status+' (expect 401)');
+    const answers=ctx.data.data;
+    answers.personal.a1.dob='1962-04-11'; answers.personal.a1.mobile='+34 611';
+    answers.personal.a2={firstName:'David',surname:'Ellison',dob:'1959-09-02'};
+    answers.properties=[{type:'Main residence',location:'Marbella, Spain',ccy:'EUR',value:'620000'}];
+    answers.cash=[{bank:'Santander',ccy:'EUR',amount:'85000'}];
+    answers.journey={priorities:'Retire in Spain.'};
+    const sub=await call('POST','/api/form/'+token+'/submit',{data:answers,joint:true});
+    say('submit -> '+sub.status+' '+JSON.stringify(sub.data));
+    say('submit without json content-type -> '+(await app(new Request('https://factfind.example/api/form/'+token+'/submit',{method:'POST',body:'{}'}))).status+' (expect 415)');
+    say('mail sent='+MAILS.length+' to='+(MAILS[0]||{}).to+' subj='+(MAILS[0]||{}).subj);
+    // ---- adviser again ----
+    cookie=saved;
+    const st2=await call('GET','/api/state');
+    const c2=st2.data.clients[0];
+    say('after submit: name='+c2.name+' status='+c2.status+' dob='+c2.data.personal.a1.dob+' partner='+c2.data.personal.a2.firstName
+      +' props='+c2.data.properties.length+' prop0.ccy='+c2.data.properties[0].ccy+' cash='+c2.data.cash.length+' joint='+c2.joint);
+    say('inbox='+st2.data.inbox.length+' summary='+JSON.stringify(st2.data.inbox[0].summary));
+    say('ack -> '+(await call('POST','/api/submissions/'+st2.data.inbox[0].id+'/ack')).status);
+    say('inbox after ack='+(await call('GET','/api/inbox')).data.inbox.length);
+    // resubmit updates, does not duplicate rows
+    answers.cash.push({bank:'HSBC',ccy:'GBP',amount:'22000'});
+    cookie=''; await call('POST','/api/form/'+token+'/submit',{data:answers,joint:true}); cookie=saved;
+    const st3=await call('GET','/api/state');
+    say('resubmit: cash rows='+st3.data.clients[0].data.cash.length+' (expect 2) inbox='+st3.data.inbox.length);
+    // advisers
+    say('add adviser short pw -> '+(await call('POST','/api/users',{name:'Sam',email:'sam@sjb-global.com',password:'short'})).status+' (expect 400)');
+    say('add adviser -> '+(await call('POST','/api/users',{name:'Sam Adviser',email:'sam@sjb-global.com',password:'sam-password-123'})).status);
+    say('duplicate adviser -> '+(await call('POST','/api/users',{name:'Sam',email:'SAM@sjb-global.com',password:'sam-password-123'})).status+' (expect 409)');
+    const ul=(await call('GET','/api/users')).data.users; say('users listed='+ul.length+' '+ul.map(u=>u.email).join(','));
+    const sam=ul.find(u=>u.email==='sam@sjb-global.com');
+    say('disable self -> '+(await call('POST','/api/users/u-1/disable')).status+' (expect 400)');
+    say('disable sam -> '+(await call('POST','/api/users/'+sam.id+'/disable')).status);
+    const keep=cookie; cookie='';
+    say('sam login while disabled -> '+(await call('POST','/api/login',{email:'sam@sjb-global.com',password:'sam-password-123'},{headers:{'x-forwarded-for':'10.9.9.9'}})).status+' (expect 401)');
+    cookie=keep;
+    say('enable sam -> '+(await call('POST','/api/users/'+sam.id+'/enable')).status);
+    cookie='';
+    const samLogin=await call('POST','/api/login',{email:'sam@sjb-global.com',password:'sam-password-123'},{headers:{'x-forwarded-for':'10.9.9.8'}});
+    const samState=(await call('GET','/api/state')).data;
+    say('sam login after enable -> '+samLogin.status+' sees clients='+samState.clients.length+' (expect 0: separate books) admin='+samState.user.admin+' inbox='+samState.inbox.length);
+    say('sam profile -> '+JSON.stringify((await call('POST','/api/profile',{name:'Samantha Adviser',phone:'+34 600'})).data.user));
+    // sam tries to touch dion's client
+    say('sam PUT dion client -> '+JSON.stringify((await call('PUT','/api/state',{clients:[{id:'cl-1',ref:'SJB-2026-001',name:'hijack',data:{}}]})).data)+' (expect denied:1)');
+    say('sam DELETE dion client -> '+(await call('DELETE','/api/clients/cl-1')).status+' (expect 403)');
+    say('sam link for dion client -> '+(await call('POST','/api/clients/cl-1/form')).status+' (expect 403)');
+    say('sam add adviser -> '+(await call('POST','/api/users',{name:'X',email:'x@sjb-global.com',password:'x-password-123'})).status+' (expect 403)');
+    say('sam list advisers -> '+(await call('GET','/api/users')).status+' (expect 403)');
+    // sam's own client is invisible to dion
+    await call('PUT','/api/state',{clients:[{id:'cl-sam',ref:'SJB-2026-050',name:'s',status:'Awaiting client',data:{personal:{a1:{firstName:'Sams',surname:'Client'},a2:{}}}}]});
+    say('sam own clients -> '+((await call('GET','/api/state')).data.clients.map(c=>c.id).join(','))+' (expect cl-sam only)');
+    cookie=keep;
+    const dionState=(await call('GET','/api/state')).data;
+    say('dion sees -> '+dionState.clients.map(c=>c.id).join(',')+' (expect cl-1 only) admin='+dionState.user.admin+' client owner='+dionState.clients[0].ownerId);
+    say('dion still has his original inbox item owner='+JSON.stringify((await MemStore.list('submissions')).map(s=>s.ownerId)));
+    // ---- document uploads ----
+    const dlk=(await call('POST','/api/clients/cl-1/docs')).data;
+    say('docs link -> '+dlk.url);
+    const dt=dlk.token; const saved2=cookie; cookie='';
+    const dctx=(await call('GET','/api/docs/'+dt)).data;
+    say('client docs ctx: first='+dctx.firstName+' uploaded='+dctx.uploaded.length);
+    // upload a 2-chunk fake jpeg
+    const bytes=new Uint8Array(1200); bytes.fill(65);
+    const half=600; const b64a=btoa(String.fromCharCode.apply(null,bytes.subarray(0,half)));
+    const b64b=btoa(String.fromCharCode.apply(null,bytes.subarray(half)));
+    const u1=(await call('POST','/api/docs/'+dt+'/upload',{name:'passport.jpg',label:'1. A photo of your UK passport',size:1200,totalChunks:2,index:0,dataB64:b64a})).data;
+    const u2=(await call('POST','/api/docs/'+dt+'/upload',{fileId:u1.fileId,name:'passport.jpg',label:'1. A photo of your UK passport',size:1200,totalChunks:2,index:1,dataB64:b64b})).data;
+    say('upload chunks -> received='+u2.received+' complete='+u2.complete+' mails now='+MAILS.length);
+    say('bad type -> '+(await call('POST','/api/docs/'+dt+'/upload',{name:'virus.exe',label:'x',size:10,totalChunks:1,index:0,dataB64:'QUFB'})).status+' (expect 400)');
+    say('details -> '+(await call('POST','/api/docs/'+dt+'/details',{tin:'X111Y',beneficiaries:[{name:'Ben One',relationship:'Son',dob:'2001-07-22',pct:'100',email:'b@x.y',address:'1 Road'}]})).status);
+    cookie=saved2;
+    const flist=(await call('GET','/api/clients/cl-1/files')).data.files;
+    say('adviser file list -> '+flist.length+' · '+flist[0].label+' '+flist[0].size+'B');
+    const dl2=await app(new Request('https://factfind.example/api/files/'+flist[0].id,{headers:new Headers({'x-session':cookie})}));
+    const got=new Uint8Array(await dl2.arrayBuffer());
+    say('download bytes='+got.length+' roundtrip ok='+(got.length===1200&&got[0]===65&&got[1199]===65)+' type='+dl2.headers.get('content-type'));
+    const st9=(await call('GET','/api/state')).data.clients[0];
+    say('tin merged='+st9.data.personal.a1.tin+' beneficiaries='+st9.data.beneficiaries.length+' ben0='+st9.data.beneficiaries[0].name);
+    // sam cannot see dion's files
+    cookie=''; await call('POST','/api/login',{email:'sam@sjb-global.com',password:'sam-password-123'},{headers:{'x-forwarded-for':'10.9.9.7'}});
+    say('sam reads dion file -> '+(await call('GET','/api/files/'+flist[0].id)).status+' (expect 403)');
+    say('sam lists dion files -> '+(await call('GET','/api/clients/cl-1/files')).status+' (expect 403)');
+    cookie=saved2;
+    say('delete file -> '+(await call('DELETE','/api/files/'+flist[0].id)).status+' then list='+((await call('GET','/api/clients/cl-1/files')).data.files.length));
+    // template upload + fetch
+    const tb=new Uint8Array(700); tb.fill(80);
+    const t1=(await call('POST','/api/upload',{name:'report.pptx',scope:'template',size:700,totalChunks:1,index:0,dataB64:btoa(String.fromCharCode.apply(null,tb))})).data;
+    say('template upload complete='+t1.complete+' · meta='+JSON.stringify((await call('GET','/api/report-template')).data.template.name));
+    // delete + backup + password
+    say('delete -> '+(await call('DELETE','/api/clients/cl-1')).status+' then clients='+(await call('GET','/api/state')).data.clients.length);
+    say('backup -> '+(await call('GET','/api/backup')).status);
+    say('password wrong current -> '+(await call('POST','/api/password',{current:'nope',next:'new-password-123'})).status+' (expect 403)');
+    say('password change -> '+(await call('POST','/api/password',{current:'correct horse battery',next:'new-password-123'})).status);
+    say('logout -> '+(await call('POST','/api/logout')).status+' then me -> '+(await call('GET','/api/me')).status+' (expect 401)');
+    // expired link
+    const f=await MemStore.get('forms',token); f.expires=Date.now()-1; await MemStore.put('forms',token,f);
+    cookie=''; say('expired link -> '+(await call('GET','/api/form/'+token)).status+' (expect 410)');
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,3).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>
+<body><pre id="out">loaded</pre></body>

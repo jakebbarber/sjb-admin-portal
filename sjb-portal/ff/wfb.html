@@ -1,0 +1,155 @@
+/* ===========================================================================
+   FEEDBACK — a way for whoever is using this to say what is wrong
+
+   Several advisers will use the portal and only one of them talks to whoever
+   maintains it. Without somewhere to put "this figure came out wrong" the
+   observation is lost by the end of the day. So: a note can be left from any
+   screen, it records where the person was standing when they left it, and it
+   syncs to the whole practice.
+
+   Notes live in the practice settings, which already sync — no new plumbing,
+   and it works the moment this is deployed.
+   ========================================================================= */
+const FB_KIND=['Something is wrong','Something is missing','An idea','A question'];
+function feedbackAll(){
+  if(!DB.settings) DB.settings={};
+  if(!Array.isArray(DB.settings.feedback)) DB.settings.feedback=[];
+  return DB.settings.feedback;
+}
+function feedbackOpen(){ return feedbackAll().filter(f=>f.status!=='done').length; }
+/* Where was the person standing? Enough to find it again, and nothing about
+   the client beyond their reference. */
+function feedbackWhere(){
+  const names={clients:'Clients',client:'A client',requests:'Work requests',export:'Export & backup',
+    settings:'Settings',reports:'Reports',lifeplan:'LifePlan',cashflow:'Cashflow',feedback:'Feedback'};
+  const bits=[names[S.screen]||S.screen||'?'];
+  if(S.screen==='client'){
+    const sec=sectionById(S.section);
+    if(sec) bits.push(sec.name);
+    const c=getClient(S.clientId);
+    if(c&&c.ref) bits.push('ref '+c.ref);
+  }
+  return bits.join(' > ');
+}
+function feedbackModal(){
+  let h=mHead('Leave a note','It goes to everyone in the practice, with a record of where you were.');
+  h+='<div class="m-b">'
+    +'<div class="note mut mb"><span class="ic">'+ic('info',15)+'</span><div>You were on '
+    +'<b>'+esc(feedbackWhere())+'</b> · build '+esc(BUILD)+'</div></div>'
+    +'<div class="field"><label class="lbl">What kind of note is it?</label>'
+    +'<select class="sel" id="fbKind">'+optsHTML(FB_KIND,FB_KIND[0],null)+'</select></div>'
+    +'<div class="field"><label class="lbl">What happened, or what would you like? <span class="req">*</span></label>'
+    +'<textarea class="ta" id="fbText" rows="5" placeholder="The transfer value came out ten times too big — the document says 78,799.84 and it read 787,998."></textarea>'
+    +'<div class="hint">Quote the figure or the wording if you can. That is what makes it fixable.</div></div>'
+    +'</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn pri" data-a="fbSave">'+ic('send',14)+' Leave the note</button></div>';
+  openModal(h);
+}
+function screenFeedback(){
+  const all=feedbackAll().slice().sort((a,b)=>(b.at||'').localeCompare(a.at||''));
+  let h='<div class="ph"><div><h1>Feedback</h1>'
+    +'<div class="sub">What everyone here has flagged. Mark things off as they are dealt with, and send the '
+    +'outstanding ones on when you want them fixed.</div></div>'
+    +'<div class="sp row" style="gap:8px">'
+    +(all.length?'<button class="btn" data-a="fbCopy">'+ic('copy',15)+' Copy the open ones</button>':'')
+    +'<button class="btn pri" data-a="fbOpen">'+ic('plus',15)+' Leave a note</button></div></div>';
+  if(!all.length){
+    h+='<div class="card"><div class="empty"><div class="ei">'+ic('clip',22)+'</div>'
+      +'<h4>Nothing flagged yet</h4><p>When something reads wrong or is missing, leave a note from wherever you '
+      +'are — the button sits in the bar at the top of every screen.</p></div></div>';
+    return h;
+  }
+  h+='<div class="card"><div class="tw"><table class="t">'
+    +'<thead><tr><th style="width:96px">When</th><th style="width:130px">Kind</th><th>Note</th>'
+    +'<th style="width:150px">Where</th><th style="width:90px">Who</th><th style="width:160px"></th></tr></thead><tbody>';
+  all.forEach(f=>{
+    const done=f.status==='done';
+    h+='<tr'+(done?' style="opacity:.55"':'')+'>'
+      +'<td class="tiny muted2">'+esc(fdateS(f.at))+'</td>'
+      +'<td class="tiny">'+esc(f.kind||'')+'</td>'
+      +'<td class="tiny" style="white-space:normal">'+esc(f.text||'')+'</td>'
+      +'<td class="tiny muted2" style="white-space:normal">'+esc(f.where||'')+'</td>'
+      +'<td class="tiny muted2">'+esc(f.by||'')+'</td>'
+      +'<td><div class="row" style="gap:5px">'
+      +'<button class="btn xs'+(f.status==='noted'?' pri':'')+'" data-a="fbMark" data-v="'+esc(f.id)+'|noted">Noted</button>'
+      +'<button class="btn xs'+(done?' pri':'')+'" data-a="fbMark" data-v="'+esc(f.id)+'|done">Done</button>'
+      +'<button class="btn xs ghost" data-a="fbDel" data-v="'+esc(f.id)+'">'+ic('trash',13)+'</button>'
+      +'</div></td></tr>';
+  });
+  h+='</tbody></table></div></div>';
+  return h;
+}
+Object.assign(ACT,{
+  fbOpen(){ feedbackModal(); },
+  fbSave(){
+    const text=(($('#fbText')||{}).value||'').trim();
+    if(!text){ toast('Nothing written','Say what happened and it can be fixed.','warn'); return; }
+    const list=feedbackAll();
+    list.unshift({id:uid('fb'),text:text.slice(0,1200),
+      kind:(($('#fbKind')||{}).value)||FB_KIND[0],
+      where:feedbackWhere(),build:BUILD,
+      by:DB.settings.adviserName||'',at:new Date().toISOString(),status:'open'});
+    while(list.length>200) list.pop();
+    save(); dismissModal(); render();
+    toast('Noted','Everyone in the practice can see it, and it is on the Feedback list.');
+  },
+  fbMark(v){
+    const parts=String(v).split('|');
+    const f=feedbackAll().find(x=>x.id===parts[0]); if(!f) return;
+    f.status=(f.status===parts[1])?'open':parts[1];
+    save(); render();
+  },
+  fbDel(v){
+    const list=feedbackAll();
+    const i=list.findIndex(x=>x.id===v); if(i<0) return;
+    list.splice(i,1); save(); render();
+    toast('Removed','The note has gone.');
+  },
+  fbCopy(){
+    const open=feedbackAll().filter(f=>f.status!=='done');
+    if(!open.length){ toast('Nothing open','Everything has been marked done.'); return; }
+    const nl=String.fromCharCode(10);
+    const out=open.map(f=>'- ['+(f.kind||'')+'] '+(f.text||'')
+      +nl+'    where: '+(f.where||'?')+' · build '+(f.build||'?')+' · '+(f.by||'someone')
+      +' · '+fdateS(f.at)).join(nl);
+    copyText('SJB Fact Find — '+open.length+' outstanding note'+(open.length===1?'':'s')+nl+nl+out,
+      open.length+' notes');
+  }
+});
+/* A place on the rail, and a way in from every screen. Several parts add their
+   own rail items, so the Settings button is found by its attributes and the
+   insertion made at the start of that tag — matching a whole tag would break
+   as soon as another part changed it. */
+function insertBefore(html,needle,what){
+  const at=html.indexOf(needle);
+  if(at<0) return null;
+  const open=html.lastIndexOf('<button',at);
+  return open<0?null:html.slice(0,open)+what+html.slice(open);
+}
+const _railHTMLFb=railHTML;
+railHTML=function(){
+  const h=_railHTMLFb();
+  if(h.indexOf('data-v="feedback"')>=0) return h;
+  const n=feedbackOpen();
+  const mine='<button class="rail-item'+(S.screen==='feedback'?' on':'')+'" data-a="go" data-v="feedback">'
+    +ic('clip',16)+'<span>Feedback</span>'+(n?'<span class="pc">'+n+'</span>':'')+'</button>';
+  return insertBefore(h,'data-a="go" data-v="settings"',mine)||h;
+};
+const _topHTMLFb=topHTML;
+topHTML=function(){
+  const h=_topHTMLFb();
+  if(h.indexOf('data-a="fbOpen"')>=0) return h;
+  const btn='<button class="btn sm ghost" data-a="fbOpen" title="Leave a note about this screen">'
+    +ic('clip',15)+' Feedback</button>';
+  return insertBefore(h,'data-a="go" data-v="export"',btn)||h.replace('</header>',btn+'</header>');
+};
+const _renderFb=render;
+render=function(){
+  if(S.screen==='feedback'){
+    $('#root').innerHTML='<div class="shell">'+railHTML()
+      +'<div class="main">'+topHTML()+storageBanner()+'<div class="page">'+screenFeedback()+'</div></div></div>';
+    if(typeof CHAT_OPEN!=='undefined'&&CHAT_OPEN) chatRender();
+    return;
+  }
+  _renderFb();
+};

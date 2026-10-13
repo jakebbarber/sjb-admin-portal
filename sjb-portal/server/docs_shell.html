@@ -1,0 +1,156 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your documents — SJB Global</title>
+<style>
+@font-face{font-family:'Manrope';font-style:normal;font-weight:200 800;font-display:swap;src:url(data:font/woff2;base64,__MANROPE_B64__) format('woff2');}
+__FORM_CSS__
+.req{border:1px solid var(--line);border-radius:12px;background:#fff;padding:16px;margin:12px 0}
+.req h3{margin:0 0 6px;font-size:15px}
+.req p{margin:0 0 10px;color:#41525C;font-size:13.5px}
+.req .done{color:#1E8E5A;font-weight:800;font-size:13px}
+.upbar{height:6px;background:#E6EBEE;border-radius:6px;overflow:hidden;margin-top:8px;display:none}
+.upbar i{display:block;height:100%;background:#F47920;transition:width .2s}
+.filerow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input[type=file]{font-size:12.5px}
+.benrow{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0;background:#FAFCFD}
+.err{color:#C0392B;font-size:12.5px;margin-top:6px}
+</style></head><body>
+<div class="wrap"><div class="head"><img src="__SJB_LOGO_DATA_URI__" alt="SJB Global" style="height:24px"><span class="hn">SJB Global</span><span class="hr2" id="refTag"></span></div>
+<div id="croot"><div class="hero"><p class="mut">Loading…</p></div></div></div>
+<script>
+window.SJB_DOCS_BOOT=async function(){
+  const $=s=>document.querySelector(s);
+  const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const token=(location.pathname.match(/\/d\/([A-Za-z0-9_-]+)/)||[])[1];
+  const root=document.getElementById('croot');
+  const fail=m=>{ root.innerHTML='<div class="hero"><h2>This link will not open</h2><p class="lead">'+esc(m)+'</p>'
+    +'<p class="mut">Please contact your adviser at SJB Global for a fresh link.</p></div>'; };
+  if(!token) return fail('The address is incomplete.');
+  let ctx;
+  try{ const r=await fetch('/api/docs/'+token); const b=await r.json().catch(()=>({}));
+    if(!r.ok) return fail(b.error||'The link is not valid.'); ctx=b;
+  }catch(e){ return fail('We could not reach the server — check your connection and try again.'); }
+  document.getElementById('refTag').textContent=ctx.ref||'';
+  const done=lbl=>ctx.uploaded.some(u=>u.label===lbl);
+  const REQS=[
+    {id:'passport',t:'1. A photo of your UK passport',
+     d:'Please make sure to include the signature page, which must be signed.'},
+    {id:'selfie',t:'2. A photo of you holding your UK passport next to your face',
+     d:'For identity verification — please make sure the passport is clear and visible.'},
+    {id:'address',t:'3. Proof of address for your current overseas residence',
+     d:'This must be a recent utility bill dated within the last six weeks.'},
+    {id:'bank',t:'4. Proof of bank',
+     d:'Please provide your UK bank statement dated within the last six weeks.'}
+  ];
+  let bens=[{}];
+  /* Ids match the portal's Bank details columns, so the answers drop straight
+     into the record and on into the MADS Apps Out block. */
+  const BANK=[
+    {id:'bank',t:'Name of bank'},
+    {id:'accountName',t:'Name on the account'},
+    {id:'ccy',t:'Currency of the account',ph:'e.g. GBP'},
+    {id:'sortCode',t:'Sort code (UK)',ph:'00-00-00'},
+    {id:'accountNo',t:'Account number (UK)'},
+    {id:'iban',t:'IBAN (overseas)'},
+    {id:'bic',t:'BIC / SWIFT (overseas)'},
+    {id:'heldSince',t:'How long have you held it?',ph:'A rough answer is fine'}
+  ];
+  let bank={};
+  function render(){
+    let h='<h1 style="font-size:24px">Hello '+esc(ctx.greetName||ctx.firstName||'there')+'</h1>'
+      +'<p class="lead">'+esc(ctx.adviserName||'Your adviser')+' needs the following so we can complete our '
+      +'anti-money-laundering checks. Please send them at your next convenience — each one uploads securely the '
+      +'moment you choose the file.</p>';
+    REQS.forEach(r=>{
+      h+='<div class="req"><h3>'+esc(r.t)+'</h3><p>'+esc(r.d)+'</p>';
+      if(done(r.t)) h+='<div class="done">✓ Received — thank you'+(ctx.uploaded.find(u=>u.label===r.t)?' ('+esc(ctx.uploaded.find(u=>u.label===r.t).name)+')':'')+'</div>'
+        +'<div class="filerow" style="margin-top:6px"><input type="file" data-req="'+r.id+'" accept=".jpg,.jpeg,.png,.pdf,.heic,.webp"><span class="mut" style="font-size:12px">Choose a file only if you need to replace it</span></div>';
+      else h+='<div class="filerow"><input type="file" data-req="'+r.id+'" accept=".jpg,.jpeg,.png,.pdf,.heic,.webp"></div>';
+      h+='<div class="upbar" id="bar-'+r.id+'"><i style="width:0%"></i></div><div class="err" id="err-'+r.id+'"></div></div>';
+    });
+    h+='<div class="req"><h3>5. Your local Tax Identification Number</h3>'
+      +'<p>The tax number for the country where you are resident.</p>'
+      +'<input class="inp" id="tin" placeholder="e.g. X1234567L" style="max-width:320px"></div>';
+    h+='<div class="req"><h3>6. Pension beneficiary details</h3>'
+      +'<p>Who should benefit from your pension. Percentages should add up to 100.</p><div id="benList">';
+    bens.forEach((b,i)=>{
+      h+='<div class="benrow"><div class="fgrid">'
+        +'<div class="fld"><label>Full name</label><input class="inp" data-b="'+i+'" data-f="name" value="'+esc(b.name||'')+'"></div>'
+        +'<div class="fld"><label>Relationship</label><input class="inp" data-b="'+i+'" data-f="relationship" value="'+esc(b.relationship||'')+'"></div>'
+        +'<div class="fld"><label>Date of birth</label><input class="inp" type="date" data-b="'+i+'" data-f="dob" value="'+esc(b.dob||'')+'"></div>'
+        +'<div class="fld"><label>Telephone number</label><input class="inp" type="tel" data-b="'+i+'" data-f="phone" value="'+esc(b.phone||'')+'"></div>'
+        +'<div class="fld"><label>Email</label><input class="inp" type="email" data-b="'+i+'" data-f="email" value="'+esc(b.email||'')+'"></div>'
+        +'<div class="fld"><label>% of entitlement</label><input class="inp" type="number" data-b="'+i+'" data-f="pct" value="'+esc(b.pct||'')+'"></div>'
+        +'<div class="fld full"><label>Residential address</label><input class="inp" data-b="'+i+'" data-f="address" value="'+esc(b.address||'')+'"></div>'
+        +'</div>'+(bens.length>1?'<button type="button" class="rm" data-rm="'+i+'">Remove</button>':'')+'</div>';
+    });
+    h+='</div><button type="button" class="btn ghost" id="addBen">+ Add another beneficiary</button></div>';
+    /* The account the provider pays out to. Asked here rather than on the Fact
+       Find: this link is the one that goes out once we are engaged, alongside
+       the statement that proves the same account. */
+    h+='<div class="req"><h3>7. Your bank account</h3>'
+      +'<p>The account you would like payments made to — the same one as the statement above. '
+      +'Fill in whichever of these apply: UK accounts usually have a sort code and account number, '
+      +'overseas accounts an IBAN and BIC.</p><div class="fgrid">'
+      +BANK.map(f=>'<div class="fld'+(f.full?' full':'')+'"><label>'+esc(f.t)+'</label>'
+        +'<input class="inp" data-k="'+f.id+'" value="'+esc(bank[f.id]||'')+'"'
+        +(f.ph?' placeholder="'+esc(f.ph)+'"':'')+'></div>').join('')
+      +'</div></div>';
+    h+='<div style="text-align:center;margin:20px 0">'
+      +'<button type="button" class="btn big" id="sendDetails">Send my details</button>'
+      +'<p class="mut" id="detMsg" style="margin-top:10px">'+(ctx.detailsAt?'✓ Details received '+esc(new Date(ctx.detailsAt).toLocaleDateString('en-GB'))+' — sending again simply updates them.':'')+'</p></div>'
+      +'<p class="tiny" style="text-align:center">Thank you — and please contact '+esc(ctx.adviserName||'your adviser')
+      +' if you have any questions or concerns. Reference '+esc(ctx.ref)+' · '+esc(ctx.org)+'</p>';
+    root.innerHTML=h;
+    wire();
+  }
+  function wire(){
+    document.querySelectorAll('input[type=file][data-req]').forEach(inp=>{
+      inp.addEventListener('change',async e=>{
+        const file=e.target.files[0]; if(!file) return;
+        const req=REQS.find(x=>x.id===e.target.dataset.req);
+        const bar=$('#bar-'+req.id), fill=bar.querySelector('i'), errEl=$('#err-'+req.id);
+        errEl.textContent=''; bar.style.display='block'; fill.style.width='2%';
+        try{
+          const buf=new Uint8Array(await file.arrayBuffer());
+          if(buf.length>12*1024*1024) throw new Error('That file is over 12 MB — a normal photo or PDF is fine.');
+          const CH=600*1024; const total=Math.ceil(buf.length/CH)||1;
+          let fileId=null;
+          for(let i=0;i<total;i++){
+            const part=buf.subarray(i*CH,Math.min((i+1)*CH,buf.length));
+            let s=''; for(let j=0;j<part.length;j+=0x8000) s+=String.fromCharCode.apply(null,part.subarray(j,Math.min(j+0x8000,part.length)));
+            const res=await fetch('/api/docs/'+token+'/upload',{method:'POST',headers:{'content-type':'application/json'},
+              body:JSON.stringify({fileId,name:file.name,label:req.t,size:buf.length,totalChunks:total,index:i,dataB64:btoa(s)})});
+            const b=await res.json().catch(()=>({}));
+            if(!res.ok) throw new Error(b.error||'Upload failed — please try again.');
+            fileId=b.fileId; fill.style.width=Math.round((i+1)/total*100)+'%';
+          }
+          ctx.uploaded.push({label:req.t,name:file.name,size:buf.length,at:new Date().toISOString()});
+          render();
+        }catch(err2){ bar.style.display='none'; errEl.textContent=err2.message; }
+      });
+    });
+    document.querySelectorAll('[data-b]').forEach(el=>el.addEventListener('input',e=>{
+      bens[+e.target.dataset.b][e.target.dataset.f]=e.target.value; }));
+    document.querySelectorAll('[data-k]').forEach(el=>el.addEventListener('input',e=>{
+      bank[e.target.dataset.k]=e.target.value; }));
+    document.querySelectorAll('[data-rm]').forEach(el=>el.addEventListener('click',e=>{ bens.splice(+e.target.dataset.rm,1); render(); }));
+    const ab=$('#addBen'); if(ab) ab.addEventListener('click',()=>{ bens.push({}); render(); });
+    $('#sendDetails').addEventListener('click',async()=>{
+      const btn=$('#sendDetails'), msg=$('#detMsg');
+      btn.disabled=true; btn.textContent='Sending…';
+      try{
+        const res=await fetch('/api/docs/'+token+'/details',{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({tin:$('#tin').value,beneficiaries:bens,bank:bank})});
+        if(!res.ok){ const b=await res.json().catch(()=>({})); throw new Error(b.error||'Could not send.'); }
+        ctx.detailsAt=new Date().toISOString();
+        msg.textContent='✓ Sent — thank you.'; btn.textContent='Send again';
+      }catch(e2){ msg.textContent=e2.message; btn.textContent='Try again'; }
+      btn.disabled=false;
+    });
+  }
+  render();
+};
+SJB_DOCS_BOOT();
+</script></body></html>

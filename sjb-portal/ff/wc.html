@@ -1,0 +1,1398 @@
+/* ===========================================================================
+   CASHFLOW — per-client forecast fed entirely by the Fact Find.
+   Modelled on the structure of FE CashCalc's Cashflow Modeller:
+   Assumptions · Pots · Income & spending · Timeline · Chart · Yearly · Stress.
+
+   Everything the adviser tweaks is stored on the client record under
+   c.cashflow, so it syncs like any other change. Asset values themselves are
+   never edited here — they belong to the Fact Find.
+
+   Every figure is BEFORE TAX. Tax was modelled here once, per country, and it
+   made the tool harder to trust than it made it useful; the adviser applies
+   the client's actual tax position outside the projection.
+   ========================================================================= */
+
+/* Static FX defaults (rate to GBP). The adviser can override per client —
+   a cashflow needs one working currency, and a guessed live rate would be
+   false precision anyway. */
+const CF_GBP={GBP:1,EUR:0.85,USD:0.78,CHF:0.88,AUD:0.51,CAD:0.57,SEK:0.074,NOK:0.072,SGD:0.60,AED:0.21,ZAR:0.043};
+/* Annual return sequences, 1990–2024, modelled on the pattern of UK
+   mixed-investment portfolios at three risk levels. The SHAPE is what is used
+   — the crash years, the recoveries, the order — while the level is rescaled
+   so the long-run average equals the adviser's assumed growth rate. So the
+   assumption stays the adviser's; history only supplies the bumps. */
+const CF_BENCH={
+  cautious:{name:'Cautious pattern (0-35% shares)',seq:[-3.1,9.4,10.2,13.6,-2.4,8.3,6.5,8.8,6.2,10.1,-0.8,-3.9,-7.6,9.3,6.0,9.2,5.4,3.4,-10.8,10.5,6.8,-1.9,5.3,8.2,3.3,1.9,7.6,5.8,-2.6,8.8,3.3,6.2,-6.1,4.8,5.5]},
+  balanced:{name:'Balanced pattern (20-60% shares)',seq:[-5.9,13.2,14.6,19.8,-4.1,11.5,8.9,12.4,8.4,14.7,-1.9,-6.8,-12.6,13.4,8.1,13.1,7.4,4.3,-17.2,14.9,9.2,-3.4,7.3,11.6,4.2,2.3,10.6,7.9,-4.1,12.4,4.4,8.6,-8.9,6.7,7.7]},
+  growth:{name:'Growth pattern (40-85% shares)',seq:[-8.2,16.5,18.1,24.9,-5.6,14.2,10.8,15.3,10.1,18.9,-3.1,-9.4,-16.8,16.9,9.8,16.5,9.1,5.2,-22.5,18.4,11.3,-4.8,9.0,14.5,4.9,2.7,13.2,9.7,-5.5,15.8,5.3,10.9,-10.2,8.1,9.4]}
+};
+function cfBenchFor(c){
+  const band=String(((c.data.risk||{}).a1||{}).atrChosen||'').toLowerCase();
+  if(band==='secure'||band==='cautious') return 'cautious';
+  if(band==='growth'||band==='speculative') return 'growth';
+  return 'balanced';
+}
+/* the sequence shifted so its mean over the horizon equals the target %/yr */
+function cfSeq(profile,targetPct,years){
+  const raw=(CF_BENCH[profile]||CF_BENCH.balanced).seq;
+  let sum=0; for(let t=0;t<years;t++) sum+=raw[t%raw.length];
+  const shift=Number(targetPct)-sum/years;
+  return t=>raw[t%raw.length]+shift;
+}
+/* Volatility per profile, so a cautious pot and a growth pot are not modelled
+   as equally risky. `vol` remains the adviser's override for the balanced
+   case and scales the rest. */
+const CF_VOL={cautious:0.55,balanced:1,growth:1.5};
+/* Charges come off the return every year, which is where they actually bite.
+   Defaults are typical of an International SIPP on a platform; the adviser
+   sets the real ones per client. Cash is not charged. */
+const CF_DEFAULTS={inflation:2.5,endAge:100,growCash:1.5,growInvest:5.0,growPension:5.0,vol:10,
+  basis:'benchmark',potBench:{},salaryGrowth:2.5,mortYears:null,loanYears:null,events:[],exclude:{},fx:{},
+  feePlatform:0.34,feeOcf:0.30,feeAdviser:1.0,fees:{},initFee:{},potVal:{},growth:{},ccyOf:{},fxDrift:{},fxShockPct:0,fxShockT:0,
+  access:{},realTerms:0,shockYear:null,shockPct:35};
+
+/* ========================== SCENARIOS ====================================
+   One client, several cashflows. "Retire at 60 in Cyprus" against "retire at
+   65 in the UK" is the conversation, and it cannot be had with a single set
+   of assumptions.
+
+   `c.cashflow` stays exactly as it was — it IS the first scenario, so every
+   existing client keeps working untouched and nothing needs migrating. Extra
+   scenarios live in `c.scenarios`, and `c.cfActive` says which one the screen
+   is showing.
+   ========================================================================= */
+function cfScenarios(c){
+  if(!c.scenarios||!c.scenarios.length){
+    /* the existing cashflow, presented as the first scenario */
+    return [{id:'base',name:(c.cashflow&&c.cashflow._name)||'Base plan',base:1}];
+  }
+  return [{id:'base',name:(c.cashflow&&c.cashflow._name)||'Base plan',base:1}]
+    .concat(c.scenarios.map(x=>({id:x.id,name:x.name||'Scenario'})));
+}
+function cfActiveId(c){
+  const list=cfScenarios(c);
+  const want=c.cfActive||'base';
+  return list.some(x=>x.id===want)?want:'base';
+}
+/* The stored settings object for whichever scenario is active. */
+function cfStore(c,id){
+  id=id||cfActiveId(c);
+  if(id==='base') return c.cashflow||{};
+  const sc=(c.scenarios||[]).find(x=>x.id===id);
+  return (sc&&sc.cashflow)||{};
+}
+function cfStoreWrite(c,id,obj){
+  id=id||cfActiveId(c);
+  if(id==='base'){ c.cashflow=obj; return; }
+  c.scenarios=c.scenarios||[];
+  const sc=c.scenarios.find(x=>x.id===id);
+  if(sc) sc.cashflow=obj;
+}
+/* Older plans may still carry tax settings (taxOn, regime, pclsAge, treat).
+   They are simply ignored — nothing needs migrating and nothing is deleted. */
+function cfSettings(c,scenarioId){
+  const raw=cfStore(c,scenarioId);
+  const s=Object.assign({},CF_DEFAULTS,raw);
+  s.events=raw.events||[];
+  s.exclude=raw.exclude||{};
+  s.fx=Object.assign({},raw.fx||{});
+  s.potBench=Object.assign({},raw.potBench||{});
+  s.ccyOf=Object.assign({},raw.ccyOf||{});
+  s.fxDrift=Object.assign({},raw.fxDrift||{});
+  s.access=Object.assign({},raw.access||{});
+  s.fees=JSON.parse(JSON.stringify(raw.fees||{}));
+  s.initFee=JSON.parse(JSON.stringify(raw.initFee||{}));
+  s.potVal=JSON.parse(JSON.stringify(raw.potVal||{}));
+  s.growth=JSON.parse(JSON.stringify(raw.growth||{}));
+  return s;
+}
+/* Total annual charge as a fraction. Kept in one place so the Assumptions tab
+   and the engine can never disagree about what is being deducted. */
+function cfFeePct(s){
+  return (Number(s.feePlatform)||0)+(Number(s.feeOcf)||0)+(Number(s.feeAdviser)||0);
+}
+/* Charges for ONE pot. A client consolidating three pensions is usually paying
+   three different sets of charges, and the whole point of the exercise is often
+   that one of them is dear — so a single practice-wide number hides the very
+   thing being demonstrated. The figures at the top are the default; anything
+   set against a pot wins. */
+function cfFeeFor(s,potId){
+  const o=(s.fees||{})[potId];
+  if(!o) return cfFeePct(s);
+  const pick=(a,b)=>o[a]==null||o[a]===''?(Number(b)||0):(Number(o[a])||0);
+  return pick('platform',s.feePlatform)+pick('ocf',s.feeOcf)+pick('adviser',s.feeAdviser);
+}
+/* A one-off charge on one pot — an initial fee on the money being advised on.
+   Held as a percentage and a year, because that is how it is quoted and
+   because the adviser needs to see it land in the projection rather than
+   quietly disappear into the growth rate. */
+function cfInitFee(s,potId){
+  const o=(s.initFee||{})[potId];
+  if(!o) return null;
+  const pct=Number(o.pct)||0;
+  if(!pct) return null;
+  return {pct,year:Number(o.year)||0};       /* year 0 = the first year */
+}
+/* has this pot been given its own figures? */
+function cfFeeCustom(s,potId){
+  const o=(s.fees||{})[potId];
+  return !!(o&&['platform','ocf','adviser'].some(k=>o[k]!=null&&o[k]!==''));
+}
+function cfSave(c,patch,scenarioId){
+  const id=scenarioId||cfActiveId(c);
+  cfStoreWrite(c,id,Object.assign({},cfStore(c,id),patch));
+  touch(c);
+}
+function cfBase(c){ return (c.data.meta&&c.data.meta.ffCurrency)||'GBP'; }
+/* Today's rate into the base currency. */
+function cfRate(c,s,ccy){
+  const base=cfBase(c);
+  if(!ccy||ccy===base) return 1;
+  return (s.fx&&s.fx[ccy]!=null)?Number(s.fx[ccy]):(CF_GBP[ccy]||1)/(CF_GBP[base]||1);
+}
+/* The rate in year t. Holding a rate flat for thirty years is false precision
+   in the other direction: a client earning in dirhams, holding sterling
+   pensions and spending euros is exposed to currency for the whole of their
+   retirement, and a flat rate hides one of their largest real risks. Drift is
+   the adviser's assumption, per currency, and defaults to zero — so nothing
+   moves until someone deliberately says it should.
+
+   `fxShockPct` applies a one-off move from a given year, for the "what if
+   sterling drops 20%" conversation. */
+function cfRateAt(c,s,ccy,t){
+  const base=cfBase(c);
+  if(!ccy||ccy===base) return 1;
+  const d=(s.fxDrift&&s.fxDrift[ccy]!=null)?Number(s.fxDrift[ccy]):0;
+  let r=cfRate(c,s,ccy)*Math.pow(1+d/100,t||0);
+  if(s.fxShockPct&&t>=(Number(s.fxShockT)||0)) r*=1+Number(s.fxShockPct)/100;
+  return r;
+}
+function cfToBase(c,s,v,ccy){
+  return (Number(v)||0)*cfRate(c,s,ccy);
+}
+/* The currency an item is actually held in: the adviser's override for this
+   plan if there is one, otherwise whatever the Fact Find recorded. */
+function cfCcyOf(s,id,fallback,base){
+  return ((s.ccyOf||{})[id])||fallback||base;
+}
+function cfCurrencies(c,s){
+  const set=new Set();
+  if(s&&s.ccyOf) Object.keys(s.ccyOf).forEach(k=>{ if(s.ccyOf[k]) set.add(s.ccyOf[k]); });
+  ['cash','investments','dcPensions','dbPensions','statePensions','properties','liabilities'].forEach(k=>
+    (c.data[k]||[]).forEach(r=>{ if(r.ccy) set.add(r.ccy); }));
+  const E=c.data.employment||{};
+  [E.a1,E.a2].forEach(e=>{ if(e&&e.salaryCcy) set.add(e.salaryCcy); });
+  set.delete(cfBase(c));
+  return [...set];
+}
+function cfPeople(c,s){
+  const P=c.data.personal||{}, R=c.data.retirement||{};
+  const mk=(k,who)=>{
+    const p=P[k]||{}; if(!p.dob) return null;
+    const by=(D(p.dob)||new Date()).getFullYear();
+    return {key:k,who,name:p.firstName||who,by,
+      retireAge:Number((s&&s['retire_'+k])||(c.cashflow&&c.cashflow['retire_'+k])||((R[k]||{}).retireAge)||65)};
+  };
+  return [mk('a1','Applicant 1'),mk('a2','Applicant 2')].filter(Boolean);
+}
+function cfOwnerKey(owner){ return owner==='Applicant 2'?'a2':'a1'; }
+
+/* ------------------------------ derivation ------------------------------ */
+function cfInputs(c,s){
+  const base=cfBase(c), people=cfPeople(c,s);
+  const byKey={}; people.forEach(p=>byKey[p.key]=p);
+  const pots=[],incomes=[],spends=[];
+  const CCY=(id,fb)=>cfCcyOf(s,id,fb,base);
+  /* A value the adviser has overridden for this plan. The Fact Find stays the
+     record of what the client has; this is what we are modelling — a pot part
+     way through a transfer, or a figure updated since the meeting. */
+  const VAL=(id,fb)=>{ const o=(s.potVal||{})[id];
+    return (o==null||o==='')?(Number(fb)||0):Number(o); };
+  (c.data.cash||[]).forEach((r,i)=>{ const id='cash'+i, cy=CCY(id,r.ccy);
+    pots.push({id,label:(r.bank||'Cash')+(r.type?' · '+r.type:''),
+    type:'cash',owner:cfOwnerKey(r.owner),ccy:cy,factCcy:r.ccy||base,wrapper:r.type||'',
+    native:VAL(id,r.amount),value:cfToBase(c,s,VAL(id,r.amount),cy),src:money(r.amount,cy)}); });
+  (c.data.investments||[]).forEach((r,i)=>{ const id='inv'+i, cy=CCY(id,r.ccy);
+    pots.push({id,label:(r.provider||'Investment')+(r.type?' · '+r.type:''),
+    type:'invest',owner:cfOwnerKey(r.owner),ccy:cy,factCcy:r.ccy||base,wrapper:r.type||'',
+    native:VAL(id,r.value),value:cfToBase(c,s,VAL(id,r.value),cy),src:money(r.value,cy)}); });
+  (c.data.dcPensions||[]).forEach((r,i)=>{
+    const ok=cfOwnerKey(r.owner);
+    const id='pen'+i, cy=CCY(id,r.ccy);
+    pots.push({id,label:(r.name||'Pension')+(r.type?' · '+r.type:''),type:'pension',owner:ok,
+      ccy:cy,factCcy:r.ccy||base,native:VAL(id,r.value),wrapper:r.type||'',
+      value:cfToBase(c,s,VAL(id,r.value),cy),src:money(r.value,cy),
+      /* the Fact Find's access age (NMPA), 55 if blank, or the adviser's own
+         figure for this plan */
+      accessAge:((s.access||{})[id]!=null&&(s.access||{})[id]!=='')?Number(s.access[id]):(Number(r.nmpa)||55),
+      accessOwn:(s.access||{})[id]!=null&&(s.access||{})[id]!=='',
+      contribNative:(Number(r.employerContrib)||0)+(Number(r.personalContrib)||0),
+      contrib:cfToBase(c,s,(Number(r.employerContrib)||0)+(Number(r.personalContrib)||0),cy)});
+  });
+  const E=c.data.employment||{};
+  people.forEach(p=>{
+    const e=E[p.key]||{};
+    const sal=(Number(e.salary)||0)+(Number(e.bonus)||0);
+    const sid='sal_'+p.key, scy=CCY(sid,e.salaryCcy);
+    if(sal>0) incomes.push({id:sid,label:p.name+' — salary & bonus',kind:'salary',owner:p.key,
+      ccy:scy,factCcy:e.salaryCcy||base,native:sal,
+      annual:cfToBase(c,s,sal,scy),untilAge:p.retireAge,inflates:true});
+  });
+  (c.data.statePensions||[]).forEach((r,i)=>{
+    const ok=cfOwnerKey(r.owner);
+    const pid='sp'+i, pcy=CCY(pid,r.ccy);
+    if(byKey[ok]&&Number(r.amount)>0) incomes.push({id:pid,label:(byKey[ok].name)+' — state pension ('+(r.country||'')+')',
+      kind:'state',owner:ok,ccy:pcy,factCcy:r.ccy||base,native:Number(r.amount)||0,
+      annual:cfToBase(c,s,r.amount,pcy),fromAge:Number(r.spa)||67,inflates:true});
+  });
+  (c.data.dbPensions||[]).forEach((r,i)=>{
+    const ok=cfOwnerKey(r.owner);
+    const did='db'+i, dcy=CCY(did,r.ccy);
+    if(byKey[ok]&&Number(r.income)>0) incomes.push({id:did,label:(r.name||'Final salary pension'),
+      kind:'db',owner:ok,ccy:dcy,factCcy:r.ccy||base,native:Number(r.income)||0,
+      annual:cfToBase(c,s,r.income,dcy),fromAge:Number(r.nra)||65,inflates:true});
+  });
+  (c.data.properties||[]).forEach((pr,i)=>{
+    const amt=(Number(pr.rental)||0)*12; if(amt<=0) return;
+    const id='rent'+i, cy=CCY(id,pr.ccy);
+    incomes.push({id,label:'Rental income'+(pr.location?' · '+pr.location:''),kind:'rent',
+      ccy:cy,factCcy:pr.ccy||base,native:amt,annual:cfToBase(c,s,amt,cy),inflates:true});
+  });
+
+  const X=c.data.incomeExp||{};
+  const mortTerm=s.mortYears!=null?Number(s.mortYears)
+    :Math.max(0,...(c.data.properties||[]).map(p=>Number(p.term)||0),(Number(X.expMortgage)>0?20:0));
+  const loanTerm=s.loanYears!=null?Number(s.loanYears)
+    :Math.max(0,...(c.data.liabilities||[]).map(l=>Number(l.term)||0),(Number(X.expLoans)>0?5:0));
+  /* Spending switches shape at retirement, exactly as the Fact Find describes
+     it: today's living costs until the first retirement, then the client's
+     desired retirement income from the Retirement section. */
+  const y0=new Date().getFullYear();
+  const firstRetT=Math.max(0,Math.min(...people.map(p=>p.by+p.retireAge))-y0);
+  const R1=(c.data.retirement||{}).a1||{}, R2=(c.data.retirement||{}).a2||{};
+  const retCcy=CCY('retinc',R1.incomeCcy);
+  let desiredNative=Number(R1.desiredIncome)||0;
+  if(R1.covers!=='Joint / household'&&Number(R2.desiredIncome)){
+    /* a second figure in another currency is brought into the first one */
+    desiredNative+=cfToBase(c,s,R2.desiredIncome,CCY('retinc2',R2.incomeCcy))/(cfRate(c,s,retCcy)||1);
+  }
+  const desired=cfToBase(c,s,desiredNative,retCcy);
+  if(Number(X.expTotal)>0) spends.push({id:'living',label:'Regular living expenditure'
+      +(desired>0?' (until retirement, '+(y0+firstRetT)+')':''),annual:Number(X.expTotal),inflates:true,
+      years:desired>0?firstRetT:null});
+  if(desired>0) spends.push({id:'retinc',label:'Desired retirement income (from '+(y0+firstRetT)+')',
+      ccy:retCcy,factCcy:R1.incomeCcy||base,native:desiredNative,
+      annual:desired,inflates:true,fromT:firstRetT});
+  if(Number(X.expMortgage)>0) spends.push({id:'mort',label:'Mortgage / rent (ends after '+mortTerm+'y)',annual:Number(X.expMortgage),years:mortTerm});
+  if(Number(X.expLoans)>0) spends.push({id:'loans',label:'Loan repayments (ends after '+loanTerm+'y)',annual:Number(X.expLoans),years:loanTerm});
+  if(Number(X.expCards)>0) spends.push({id:'cards',label:'Credit card payments',annual:Number(X.expCards),inflates:true});
+  return {base,people,pots:pots.filter(p=>!s.exclude[p.id]),allPots:pots,incomes:incomes.filter(x=>!s.exclude[x.id]),
+    allIncomes:incomes,spends,mortTerm,loanTerm};
+}
+
+/* -------------------------------- engine -------------------------------- */
+function cfRand(seed){ let a=seed>>>0||1;
+  return ()=>{ a|=0; a=(a+0x6D2B79F5)|0; let t=Math.imul(a^(a>>>15),1|a);
+    t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+function cfNormal(rnd){ let u=0,v=0; while(u===0)u=rnd(); while(v===0)v=rnd();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+
+/* One year at a time, before tax:
+     income  = every source that is switched on this year, plus one-off money in
+     expenses= living costs (or the desired retirement income), mortgage, loans,
+               cards, pension contributions, one-off money out
+     surplus goes into cash; a deficit is drawn from savings — cash first, then
+     investments, then pensions once they can be accessed. Whatever the savings
+     cannot cover is a shortfall, and the shortfalls accumulate so the chart can
+     show how deep the hole would be.
+
+   Every row keeps the income by SOURCE and the value by POT, because that is
+   what the two charts are built from. */
+function cfRun(c,s,randomised,seed){
+  const inp=cfInputs(c,s);
+  if(!inp.people.length) return null;
+  const y0=new Date().getFullYear();
+  const endYear=Math.max(...inp.people.map(p=>p.by+Number(s.endAge)));
+  const pots=inp.pots.map(p=>Object.assign({},p,{ccy:p.ccy||inp.base,
+    native:p.native!=null?p.native:p.value}));
+  const base0=inp.base;
+  /* every conversion in the loop goes through here, so drift and any FX
+     shock apply consistently to assets, income and spending alike */
+  const rate=(ccy,t)=>cfRateAt(c,s,ccy||base0,t);
+  const rnd=randomised?cfRand(seed||42):null;
+  if(rnd) for(let i=0;i<40;i++) rnd();
+  const rows=[]; let shortfallYear=null, cumShort=0;
+  const firstRet=Math.min(...inp.people.map(p=>p.by+p.retireAge));
+  let atRetirement=null;
+  const horizon=endYear-y0+1;
+  const defBench=cfBenchFor(c);
+  const seqCache={};
+  const seqFor=(pot)=>{
+    const prof=s.potBench[pot.id]||defBench;
+    const target=pot.type==='invest'?s.growInvest:s.growPension;
+    const key=prof+'|'+target;
+    if(!seqCache[key]) seqCache[key]=cfSeq(prof,target,horizon);
+    return seqCache[key];
+  };
+  /* ONE market draw per year, shared by every growth pot.
+     Drawing separately per pot was the old behaviour and it quietly invented
+     diversification that does not exist — a crash hits everything at once.
+     Each pot's exposure to that shock scales with its risk profile. */
+  const shocks={};
+  const marketZ=t=>{
+    if(!rnd) return 0;
+    if(shocks[t]==null) shocks[t]=Math.max(-4,Math.min(4,cfNormal(rnd)));
+    return shocks[t];
+  };
+  const growFor=(pot,t)=>{
+    const type=pot.type;
+    const own=(s.growth||{})[pot.id];
+    const g=(own!=null&&own!=='')?Number(own)
+      :(type==='cash'?Number(s.growCash):type==='invest'?Number(s.growInvest):Number(s.growPension));
+    /* cash: no charge, no volatility */
+    if(type==='cash') return g/100;
+    const feePct=cfFeeFor(s,pot.id);           /* this pot's own charges */
+    const net=g-feePct;                        /* they bite every year */
+    if(rnd){
+      /* Log-normal, so compounding does not overstate the median. The drift
+         is set from the ARITHMETIC target the adviser typed, less the
+         variance drag — volatility genuinely costs return over time. */
+      const sd=Number(s.vol)*(CF_VOL[s.potBench[pot.id]||defBench]||1)/100;
+      const mu=Math.log(1+Math.max(-0.95,net/100))-sd*sd/2;
+      return Math.exp(mu+sd*marketZ(t))-1;
+    }
+    if(s.basis==='benchmark') return (seqFor(pot)(t)-feePct)/100;
+    return net/100;
+  };
+  /* the income sources, in the order they stack on the chart */
+  const sources=inp.incomes.map(x=>({id:x.id,label:x.label,kind:x.kind}));
+  if((s.events||[]).some(ev=>ev.dir!=='out')) sources.push({id:'events',label:'One-off money in',kind:'event'});
+  /* the order savings are spent: cash, then investments, then pensions */
+  const rank=p=>p.type==='cash'?0:p.type==='invest'?1:2;
+  for(let year=y0;year<=endYear;year++){
+    const t=year-y0;
+    const infl=Math.pow(1+Number(s.inflation)/100,t);
+    const salInfl=Math.pow(1+Number(s.salaryGrowth)/100,t);
+    const ages={}; inp.people.forEach(p=>ages[p.key]=year-p.by);
+    let income=0; const srcInc={};
+    inp.incomes.forEach(x=>{
+      const age=x.owner?ages[x.owner]:null;
+      let on=true;
+      if(x.untilAge!=null&&age!=null&&age>=x.untilAge) on=false;
+      if(x.fromAge!=null&&age!=null&&age<x.fromAge) on=false;
+      if(!on) return;
+      const nat=(x.native!=null?x.native:x.annual)*(x.kind==='salary'?salInfl:(x.inflates?infl:1));
+      const v=nat*rate(x.ccy,t);
+      income+=v; srcInc[x.id]=(srcInc[x.id]||0)+v;
+    });
+    /* A pot whose owner has no date of birth on the Fact Find (a partner
+       entered in outline) is treated as the first applicant's — otherwise its
+       age is unknown and a pension could never be drawn. */
+    const personOf=p=>inp.people.find(q=>q.key===p.owner)||inp.people[0];
+    const ageOf=p=>ages[personOf(p).key];
+    let contrib=0;
+    pots.forEach(p=>{ const cn=p.contribNative!=null?p.contribNative:0;
+      if(cn&&ageOf(p)<personOf(p).retireAge){
+        p.native+=cn; contrib+=cn*rate(p.ccy,t); } });
+    let spend=0;
+    inp.spends.forEach(x=>{
+      if(x.years!=null&&t>=x.years) return;      /* stops after a term */
+      if(x.fromT!=null&&t<x.fromT) return;       /* starts at retirement */
+      const nat=(x.native!=null?x.native:x.annual)*(x.inflates?infl:1);
+      spend+=nat*rate(x.ccy,t);
+    });
+    let evIn=0;
+    (s.events||[]).forEach(ev=>{ if(Number(ev.year)===year){
+      const v=cfToBase(c,s,ev.amount,ev.ccy);
+      if(ev.dir==='out') spend+=v; else evIn+=v; } });
+    if(evIn>0){ income+=evIn; srcInc.events=(srcInc.events||0)+evIn; }
+    const expenses=spend+contrib;
+    const net=income-expenses;
+    let shortfall=0, drawn=0, locked=[];
+    if(net>=0){
+      const cashPot=pots.find(p=>p.type==='cash')||pots[0];
+      if(cashPot) cashPot.native+=net/rate(cashPot.ccy,t);
+    } else {
+      let need=-net;
+      const canTouch=p=>p.type!=='pension'||ageOf(p)>=(p.accessAge||55);
+      const order=pots.filter(canTouch).sort((a,b)=>rank(a)-rank(b));
+      for(const p of order){
+        if(need<=0) break;
+        const fx=rate(p.ccy,t);
+        const take=Math.min(p.native*fx,need);
+        if(take<=0) continue;
+        p.native-=take/fx; need-=take; drawn+=take;
+      }
+      if(need>0.5){
+        shortfall=need; if(shortfallYear==null) shortfallYear=year;
+        /* a shortfall with money still in the plan needs explaining: say
+           which pots could not be drawn this year, and until when */
+        locked=pots.filter(p=>!canTouch(p)&&p.native>0).map(p=>({id:p.id,label:p.label,
+          value:p.native*rate(p.ccy,t),until:p.accessAge||55,yearsAway:(p.accessAge||55)-ageOf(p),owner:personOf(p).name}));
+      }
+    }
+    cumShort+=shortfall;
+
+    /* An initial fee comes off the pot once, in the year it is charged, before
+       that year's growth — which is when it is actually taken. */
+    let initFees=0;
+    pots.forEach(pt=>{
+      const f=cfInitFee(s,pt.id);
+      if(!f||f.year!==t) return;
+      const cut=pt.native*f.pct/100;
+      pt.native-=cut;
+      initFees+=cut*rate(pt.ccy,t);
+    });
+
+    /* a one-off market shock, for the sequence-of-returns test */
+    const shocked=s.shockYear!=null&&Number(s.shockYear)===year;
+    const potVal={};
+    pots.forEach(p=>{
+      p.native*=1+growFor(p,t);
+      if(shocked&&p.type!=='cash') p.native*=1-Number(s.shockPct)/100;
+      if(p.native<0) p.native=0;
+      p.value=p.native*rate(p.ccy,t);      /* what it is worth in base today */
+      potVal[p.id]=p.value;
+    });
+    const sums={cash:0,invest:0,pension:0};
+    pots.forEach(p=>sums[p.type]+=p.value);
+    const total=sums.cash+sums.invest+sums.pension;
+    rows.push({year,t,ages:Object.assign({},ages),income,spend,contrib,expenses,net,drawn,shortfall,locked,
+      deficit:cumShort,initFees,srcInc,potVal,
+      cash:sums.cash,invest:sums.invest,pension:sums.pension,total});
+  }
+  /* "Today's money": every figure divided by inflation to date, which is how
+     CashCalc shows it and the only way a forty-year chart stays readable —
+     living costs read as a flat line rather than climbing off the top. The
+     maths above is nominal; only what is reported changes. */
+  if(s.realTerms){
+    const MON=['income','spend','contrib','expenses','net','drawn','shortfall','initFees','cash','invest','pension','total'];
+    let cum=0;
+    rows.forEach(r=>{
+      const k=Math.pow(1+Number(s.inflation)/100,r.t);
+      MON.forEach(f=>{ r[f]=r[f]/k; });
+      Object.keys(r.srcInc).forEach(id=>{ r.srcInc[id]/=k; });
+      Object.keys(r.potVal).forEach(id=>{ r.potVal[id]/=k; });
+      (r.locked||[]).forEach(l=>{ l.value/=k; });
+      cum+=r.shortfall; r.deficit=cum;
+    });
+  }
+  const retRow=rows.find(r=>r.year>=firstRet);
+  atRetirement=retRow?retRow.total:(rows.length?rows[rows.length-1].total:0);
+  const peak=rows.reduce((a,r)=>Math.max(a,r.total),0);
+  let maxDD=0, run=0;
+  rows.forEach(r=>{ run=Math.max(run,r.total); if(run>0) maxDD=Math.max(maxDD,(run-r.total)/run); });
+  return {rows,base:inp.base,people:inp.people,inp,sources,realTerms:!!s.realTerms,
+    potList:pots.map(p=>({id:p.id,label:p.label,type:p.type,owner:p.owner})),
+    startTotal:inp.pots.reduce((a,p)=>a+p.value,0),
+    atRetirement,
+    endTotal:rows.length?rows[rows.length-1].total:0,
+    totalInitFees:rows.reduce((a,r)=>a+(r.initFees||0),0),
+    totalDrawn:rows.reduce((a,r)=>a+r.drawn,0),
+    totalShortfall:rows.length?rows[rows.length-1].deficit:0,
+    totalFees:(function(){ const all=inp.pots.filter(x=>x.type!=='cash').map(x=>cfFeeFor(s,x.id));
+      if(!all.length) return cfFeePct(s);
+      const lo=Math.min.apply(null,all), hi=Math.max.apply(null,all);
+      return lo===hi?lo:{lo,hi}; })(),peak,maxDD,
+    firstRetYear:firstRet,shortfallYear};
+}
+function cfMonteCarlo(c,s,n){
+  n=n||250;
+  const totals=[],perYear=[],runs=[]; let ok=0;
+  for(let i=0;i<n;i++){
+    const r=cfRun(c,s,true,1000+i*7919);
+    if(!r) return null;
+    if(r.shortfallYear==null) ok++;
+    totals.push(r.endTotal); runs.push(r);
+    r.rows.forEach((row,j)=>{ (perYear[j]=perYear[j]||[]).push(row.total); });
+  }
+  const pct=(arr,p)=>{ const a=arr.slice().sort((x,y)=>x-y); return a[Math.min(a.length-1,Math.floor(p*a.length))]; };
+  /* Value at Risk and its conditional cousin, on the ending outcome. VaR is
+     the 5th percentile — "one run in twenty finishes below this". CVaR is the
+     average of that worst 5%, which is the number that actually matters: it
+     says how bad the bad cases are, not just where the line sits. */
+  const sorted=totals.slice().sort((a,b)=>a-b);
+  const cut=Math.max(1,Math.floor(0.05*sorted.length));
+  const cvar=sorted.slice(0,cut).reduce((a,x)=>a+x,0)/cut;
+  const dd=runs.map(r=>r.maxDD).sort((a,b)=>a-b);
+  return {n,success:Math.round(ok/n*100),
+    band:perYear.map(a=>({p10:pct(a,0.10),p50:pct(a,0.50),p90:pct(a,0.90)})),
+    var5:sorted[cut-1],cvar5:cvar,
+    p10:pct(totals,0.10),p50:pct(totals,0.50),p90:pct(totals,0.90),
+    medianDD:dd[Math.floor(dd.length/2)]||0,worstDD:dd[dd.length-1]||0,
+    ruinYears:runs.filter(r=>r.shortfallYear!=null).map(r=>r.shortfallYear).sort((a,b)=>a-b)};
+}
+/* Sequence-of-returns: the same plan, with one bad year dropped in at
+   different points around retirement. Two people with identical average
+   returns can end up in completely different places depending on WHEN the
+   bad year lands — earliest is worst, because the pot never recovers the
+   ground it gives up while it is also being drawn on. */
+function cfSequenceTest(c,s,offsets){
+  const base=cfRun(c,s,false);
+  if(!base) return null;
+  const ret=base.firstRetYear;
+  const out=(offsets||[-5,0,5,10]).map(off=>{
+    const r=cfRun(c,Object.assign({},s,{shockYear:ret+off,shockPct:s.shockPct}),false);
+    /* Two ways a shock shows up, and which one matters depends on the plan.
+       If there is money left at the end, it costs end value. If the plan was
+       always going to run out, it costs YEARS — the money runs dry earlier,
+       which is what the client actually feels. */
+    return {off,year:ret+off,
+      end:r?r.endTotal:0,shortfallYear:r?r.shortfallYear:null,
+      cost:base.endTotal-(r?r.endTotal:0),
+      yearsLost:(r&&r.shortfallYear!=null)
+        ? (base.shortfallYear!=null?base.shortfallYear-r.shortfallYear
+                                   :(base.rows[base.rows.length-1].year)-r.shortfallYear)
+        : 0};
+  });
+  return {base:base.endTotal,baseShortfall:base.shortfallYear,
+    retYear:ret,pct:Number(s.shockPct),runs:out};
+}
+/* The largest level, inflation-linked withdrawal the plan survives. Bisected
+   on the actual model rather than assuming any rule of thumb, so it reflects
+   this client's charges, state pension and dates rather than someone else's. */
+function cfSafeWithdrawal(c,s){
+  const base=cfRun(c,s,false);
+  if(!base||!base.inp.people.length) return null;
+  const spends=base.inp.spends.filter(x=>x.id==='retinc');
+  if(!spends.length) return null;
+  const start=spends[0].annual;
+  const survives=amt=>{
+    const c2=Object.assign({},c);
+    const s2=Object.assign({},s,{_retIncOverride:amt});
+    const r=cfRunWithRetInc(c2,s2,amt);
+    return r&&r.shortfallYear==null;
+  };
+  if(!survives(start*0.2)) return {amount:0,start,pot:base.atRetirement};
+  let lo=start*0.2, hi=start*4;
+  if(survives(hi)) return {amount:hi,start,pot:base.atRetirement,capped:1};
+  for(let i=0;i<18;i++){ const mid=(lo+hi)/2; if(survives(mid)) lo=mid; else hi=mid; }
+  return {amount:lo,start,pot:base.atRetirement,
+    rate:base.atRetirement>0?lo/base.atRetirement*100:0};
+}
+/* cfRun with the desired retirement income replaced — used by the search
+   above without disturbing the client's own figure. */
+function cfRunWithRetInc(c,s,amt){
+  const _inputs=cfInputs;
+  cfInputs=function(cc,ss){
+    const inp=_inputs(cc,ss);
+    inp.spends=inp.spends.map(x=>x.id==='retinc'?Object.assign({},x,{annual:amt}):x);
+    return inp;
+  };
+  try{ return cfRun(c,s,false); } finally { cfInputs=_inputs; }
+}
+
+/* --------------------------------- charts --------------------------------
+   Two charts, laid out the way CashCalc lays them out, because that is what
+   the advisers and their clients already know how to read.
+
+   CASH FLOW FORECAST  one bar per year. Income stacks up by source; the
+     black line is what goes out; the pale green block is the gap the savings
+     have to fill; red is the part of the gap the savings could not fill.
+   SAVINGS OVER TIME   one bar per year, each pot its own colour. Once the
+     savings are gone, the accumulated shortfall shows as red below the line.
+   ------------------------------------------------------------------------- */
+const CF_PAL=['#3E7BE6','#D9463B','#F3B21B','#2E9E5B','#8E44AD','#17A2B8','#F0762B','#6C8E1C',
+  '#5A5FC7','#E0459A','#20A090','#8B6A5A','#A0522D','#4682B4'];
+const CF_COV='#B9E3C5', CF_SHORT='#E8695A', CF_LINE='#1A1A1A';
+function cfPal(i){ return CF_PAL[i%CF_PAL.length]; }
+/* a "nice" step for the value axis, so the gridlines land on round numbers */
+function cfNice(range,steps){
+  const raw=range/(steps||5); if(raw<=0) return 1;
+  const p=Math.pow(10,Math.floor(Math.log10(raw)));
+  const m=raw/p;
+  return (m<=1?1:m<=2?2:m<=2.5?2.5:m<=5?5:10)*p;
+}
+function cfAxisFmt(v){
+  const a=Math.abs(v);
+  const s=a>=1e6?(a/1e6).toFixed(a%1e6===0?0:1)+'m':a>=1e3?Math.round(a/1e3)+'k':String(Math.round(a));
+  return (v<0?'−':'')+s;
+}
+function cfRect(x,y,w,h,fill,title,extra){
+  if(h<=0.05) return '';
+  return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+h.toFixed(1)
+    +'" fill="'+fill+'"'+(extra||'')+'>'+(title?'<title>'+esc(title)+'</title>':'')+'</rect>';
+}
+function cfChip(color,label,dashed){
+  return '<span class="row" style="gap:6px;align-items:center;white-space:nowrap"><i style="display:inline-block;width:11px;height:11px;'
+    +(dashed?'border:2px solid '+color+';box-sizing:border-box;':'background:'+color+';')+'border-radius:2px"></i>'+esc(label)+'</span>';
+}
+/* the two rows of ages under the x axis, one per person, every other year */
+function cfAgeAxis(res,xc,yTop){
+  let h='';
+  res.rows.forEach((r,i)=>{
+    if(i%2) return;
+    res.people.forEach((p,k)=>{
+      h+='<text x="'+xc(i).toFixed(1)+'" y="'+(yTop+k*11)+'" text-anchor="middle" font-size="9" fill="var(--ink-4)">'
+        +r.ages[p.key]+'</text>';
+    });
+  });
+  return h;
+}
+function cfRetireMarks(res,x,T,yBot){
+  /* two people retiring in the same year share one marker, so the labels do
+     not print over each other */
+  const at={};
+  res.people.forEach(p=>{
+    const i=res.rows.findIndex(r=>r.year>=p.by+p.retireAge);
+    if(i>=0) (at[i]=at[i]||[]).push(p.name);
+  });
+  let h='';
+  Object.keys(at).forEach(k=>{ const i=Number(k), who=at[k];
+    h+='<line x1="'+x(i).toFixed(1)+'" y1="'+T+'" x2="'+x(i).toFixed(1)+'" y2="'+yBot+'" stroke="var(--orange)" stroke-dasharray="4 4"/>'
+      +'<text x="'+(x(i)+4).toFixed(1)+'" y="'+(T+10)+'" font-size="10" fill="var(--orange-d)">'
+      +esc(who.join(' & '))+(who.length>1?' retire':' retires')+'</text>';
+  });
+  return h;
+}
+function cfChartFlow(res){
+  const rows=res.rows; if(!rows.length) return '';
+  const W=880,L=58,R=12,T=16,B=26+res.people.length*11,H=290+B;
+  const n=rows.length;
+  const ymax=Math.max(1,...rows.map(r=>Math.max(r.expenses,r.income)))*1.06;
+  const slot=(W-L-R)/n, bw=Math.max(1,slot-1.2);
+  const x=i=>L+slot*i, xc=i=>L+slot*(i+0.5);
+  const y=v=>T+(H-T-B)*(1-v/ymax);
+  const step=cfNice(ymax,5);
+  let g='';
+  for(let v=0;v<=ymax;v+=step){
+    g+='<line x1="'+L+'" y1="'+y(v).toFixed(1)+'" x2="'+(W-R)+'" y2="'+y(v).toFixed(1)+'" stroke="var(--line-2)"/>'
+      +'<text x="'+(L-8)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--ink-4)">'+cfAxisFmt(v)+'</text>';
+  }
+  let bars='', anyCov=false, anyShort=false;
+  const used={};
+  rows.forEach((r,i)=>{
+    let acc=0;
+    const who=res.people.map(p=>r.ages[p.key]).join(' & ');
+    res.sources.forEach((sc,k)=>{
+      const v=r.srcInc[sc.id]||0; if(v<=0) return;
+      used[sc.id]=1;
+      bars+=cfRect(x(i),y(acc+v),bw,y(acc)-y(acc+v),cfPal(k),r.year+' (age '+who+') · '+sc.label+': '+money(v,res.base));
+      acc+=v;
+    });
+    if(r.drawn>0){ anyCov=true;
+      bars+=cfRect(x(i),y(acc+r.drawn),bw,y(acc)-y(acc+r.drawn),CF_COV,r.year+' · Deficit covered by savings: '+money(r.drawn,res.base));
+      acc+=r.drawn; }
+    if(r.shortfall>0){ anyShort=true;
+      bars+=cfRect(x(i),y(acc+r.shortfall),bw,y(acc)-y(acc+r.shortfall),CF_SHORT,r.year+' · Shortfall not covered: '+money(r.shortfall,res.base)); }
+  });
+  /* the expenses line steps across each year's bar */
+  let line='';
+  rows.forEach((r,i)=>{ line+=(i?'L':'M')+x(i).toFixed(1)+' '+y(r.expenses).toFixed(1)+' L'+(x(i)+slot).toFixed(1)+' '+y(r.expenses).toFixed(1)+' '; });
+  const yBot=H-B;
+  let legend='<div class="row wrapf tiny muted" style="gap:14px;margin-top:8px">'
+    +'<span class="row" style="gap:6px;align-items:center"><i style="display:inline-block;width:14px;height:2px;background:'+CF_LINE+'"></i>Expenses</span>'
+    +(anyCov?cfChip(CF_COV,'Deficit covered by savings'):'')
+    +(anyShort?cfChip(CF_SHORT,'Shortfall not covered'):'')
+    +res.sources.map((sc,k)=>used[sc.id]?cfChip(cfPal(k),sc.label):'').join('')
+    +'</div>';
+  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Cash flow forecast">'
+    +g+bars
+    +'<path d="'+line+'" fill="none" stroke="'+CF_LINE+'" stroke-width="2"/>'
+    +'<line x1="'+L+'" y1="'+yBot+'" x2="'+(W-R)+'" y2="'+yBot+'" stroke="var(--ink-4)"/>'
+    +cfRetireMarks(res,x,T,yBot)
+    +cfAgeAxis(res,xc,yBot+13)
+    +'</svg>'+legend;
+}
+function cfChartSavings(res,mc){
+  const rows=res.rows; if(!rows.length) return '';
+  const W=880,L=58,R=12,T=16,B=26+res.people.length*11,H=290+B;
+  const n=rows.length;
+  let ymax=Math.max(1,...rows.map(r=>r.total));
+  if(mc) ymax=Math.max(ymax,...mc.band.map(b=>b.p90));
+  ymax*=1.06;
+  const ymin=-Math.max(0,...rows.map(r=>r.deficit))*1.06;
+  const slot=(W-L-R)/n, bw=Math.max(1,slot-1.2);
+  const x=i=>L+slot*i, xc=i=>L+slot*(i+0.5);
+  const y=v=>T+(H-T-B)*(1-(v-ymin)/(ymax-ymin));
+  const step=cfNice(ymax-ymin,6);
+  let g='';
+  for(let v=Math.ceil(ymin/step)*step;v<=ymax;v+=step){
+    g+='<line x1="'+L+'" y1="'+y(v).toFixed(1)+'" x2="'+(W-R)+'" y2="'+y(v).toFixed(1)+'" stroke="var(--line-2)"/>'
+      +'<text x="'+(L-8)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--ink-4)">'+cfAxisFmt(v)+'</text>';
+  }
+  let bars='', anyDef=false;
+  const used={};
+  rows.forEach((r,i)=>{
+    let acc=0;
+    const who=res.people.map(p=>r.ages[p.key]).join(' & ');
+    res.potList.forEach((pt,k)=>{
+      const v=r.potVal[pt.id]||0; if(v<=0) return;
+      used[pt.id]=1;
+      bars+=cfRect(x(i),y(acc+v),bw,y(acc)-y(acc+v),cfPal(k),r.year+' (age '+who+') · '+pt.label+': '+money(v,res.base));
+      acc+=v;
+    });
+    if(r.deficit>0){ anyDef=true;
+      bars+=cfRect(x(i),y(0),bw,y(-r.deficit)-y(0),CF_SHORT,r.year+' · Accumulated shortfall: '+money(r.deficit,res.base)); }
+  });
+  let band='';
+  if(mc){
+    let up='',dn='',mid='';
+    mc.band.forEach((b,i)=>{ up+=(i?'L':'M')+xc(i).toFixed(1)+' '+y(b.p90).toFixed(1);
+      dn=('L'+xc(i).toFixed(1)+' '+y(b.p10).toFixed(1))+dn;
+      mid+=(i?'L':'M')+xc(i).toFixed(1)+' '+y(b.p50).toFixed(1); });
+    band='<path d="'+up+dn+'Z" fill="var(--blue)" opacity=".13"/>'
+      +'<path d="'+mid+'" fill="none" stroke="var(--blue)" stroke-width="2" stroke-dasharray="5 4"/>';
+  }
+  const yBot=H-B, y0=y(0);
+  let legend='<div class="row wrapf tiny muted" style="gap:14px;margin-top:8px">'
+    +res.potList.map((pt,k)=>used[pt.id]?cfChip(cfPal(k),pt.label):'').join('')
+    +(anyDef?cfChip(CF_SHORT,'Accumulated shortfall'):'')
+    +(mc?cfChip('var(--blue)','Likely range (1 in 10 worst to best)',true):'')
+    +'</div>';
+  return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Savings over time">'
+    +g+bars+band
+    +'<line x1="'+L+'" y1="'+y0.toFixed(1)+'" x2="'+(W-R)+'" y2="'+y0.toFixed(1)+'" stroke="var(--ink-4)"/>'
+    +cfRetireMarks(res,x,T,yBot)
+    +cfAgeAxis(res,xc,yBot+13)
+    +'</svg>'+legend;
+}
+/* kept for anything that still asks for "the chart" */
+function cfChart(res,mc){ return cfChartSavings(res,mc); }
+
+/* --------------------------------- screen -------------------------------- */
+const CF_TABS=[['assume','Assumptions'],['pots','Pots'],['flows','Income & spending'],['events','Timeline'],
+  ['compare','Compare'],
+  ['chart','Cashflow model'],['yearly','Yearly breakdown'],['stress','Stress test']];
+let CF_MC=null, CF_SEQ=null, CF_SWR=null, CF_FX=null;
+
+function screenCashflow(){
+  const c=getClient(S.clientId);
+  if(!c) return '<div class="empty"><h4>No client selected</h4></div>';
+  const s=cfSettings(c);
+  const base=cfBase(c);
+  const people=cfPeople(c,s);
+  let h='<div class="row" style="gap:8px;margin-bottom:14px">'
+    +'<button class="btn sm ghost" data-a="open" data-v="'+esc(c.id)+'">'+ic('chevL',15)+' '+esc(clientName(c))+'</button>'
+    +'<span class="bdg mut">forecast in '+esc(base)+'</span>'
+    +'<span class="bdg mut">before tax</span>'
+    +'<span class="bdg mut">'+(s.realTerms?'today’s money':'future money')+'</span>'
+    +'<span class="tiny muted sp">A planning illustration, not a guarantee — investment values can fall as well as rise.</span></div>';
+  if(!people.length){
+    return h+'<div class="card"><div class="empty"><div class="ei">'+ic('chart',24)+'</div>'
+      +'<h4>Add a date of birth first</h4><p>The forecast needs at least Applicant 1’s date of birth in '
+      +'<b>Personal details</b> — everything else is optional and can be layered in.</p>'
+      +'<div class="mt"><button class="btn pri" data-a="open" data-v="'+esc(c.id)+'">Open the Fact Find</button></div></div></div>';
+  }
+  const res=cfRun(c,s,false);
+  const tab=S.cfTab||'chart';
+  h+='<div class="ph" style="margin-bottom:12px"><div><h1>Cashflow — '+esc(clientName(c))+'</h1>'
+    +'<div class="sub">Built from the Fact Find. Change an assumption and everything recalculates and saves.</div></div></div>';
+  /* KPI tiles */
+  const sfy=res.shortfallYear;
+  h+='<div class="grid g4 mb">'
+    +cfKpi('Savings today',money(res.startTotal,base),'')
+    +cfKpi('At first retirement ('+res.firstRetYear+')',money(res.atRetirement,base),'')
+    +cfKpi('At age '+s.endAge,money(res.endTotal,base),'')
+    +(sfy?cfKpi('Money runs out','<span style="color:var(--risk)">'+sfy+'</span>','age '+(sfy-people[0].by)+' for '+esc(people[0].name),1)
+         :cfKpi('Shortfall','<span style="color:var(--ok)">None</span>','money lasts to age '+s.endAge));
+  h+='</div>';
+  h+=cfLockedNote(res,base);
+  /* which plan we are looking at */
+  const SC=cfScenarios(c), act=cfActiveId(c);
+  h+='<div class="row wrapf" style="gap:6px;margin-bottom:10px;align-items:center">'
+    +'<span class="tiny muted2" style="margin-right:2px">Plan</span>'
+    +SC.map(x=>'<button class="btn sm'+(x.id===act?' pri':'')+'" data-a="cfScen" data-v="'+esc(x.id)+'">'
+      +esc(x.name)+'</button>').join('')
+    +'<button class="btn sm ghost" data-a="cfScenAdd" title="Copy this plan and change something">'
+    +ic('plus',13)+' Another plan</button>'
+    +(act!=='base'?'<button class="btn sm ghost" data-a="cfScenRename">'+ic('file',13)+' Rename</button>'
+      +'<button class="btn sm ghost danger" data-a="cfScenDel">'+ic('trash',13)+'</button>':'')
+    +'</div>';
+  h+='<div class="row wrapf mb-s" style="gap:6px">'+CF_TABS.map(([id,nm])=>
+    '<button class="btn sm'+(tab===id?' dark':'')+'" data-a="cfTab" data-v="'+id+'">'+nm+'</button>').join('')+'</div>';
+  h+='<div class="card"><div class="card-b">'+cfTabBody(c,s,res,tab)+'</div></div>';
+  return h;
+}
+/* "It runs out, but the pension is still there" — the question this answers.
+   Shown whenever the first shortfall year has money the plan was not allowed
+   to touch. */
+function cfLockedNote(res,base){
+  if(!res.shortfallYear) return '';
+  const r0=res.rows.find(r=>r.year===res.shortfallYear);
+  if(!r0||!r0.locked||!r0.locked.length) return '';
+  const later=r0.locked.filter(l=>l.yearsAway>0);
+  const bits=r0.locked.map(l=>'<b>'+esc(l.label)+'</b> ('+money(l.value,base)+') cannot be drawn until '
+    +esc(l.owner)+' is '+l.until+(l.yearsAway>0?' — '+l.yearsAway+' year'+(l.yearsAway===1?'':'s')+' later':''));
+  return '<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div>'
+    +'<b>The shortfall starts while there is still money in the plan.</b> In '+res.shortfallYear+' '
+    +bits.join('; ')+'. Everything that could be spent had been. '
+    +(later.length?'If the client can take it earlier, set <b>Accessible from age</b> on that pot on the Pots tab; '
+      +'otherwise the gap until then has to be met from somewhere else, or retirement moved later on Assumptions.':'')
+    +'</div></div>';
+}
+function cfKpi(label,val,sub,warn){
+  return '<div class="card pad"><div class="label">'+label+'</div>'
+    +'<div class="big b8" style="font-size:20px;margin-top:4px">'+val+'</div>'
+    +(sub?'<div class="tiny muted2">'+sub+'</div>':'')+'</div>';
+}
+/* A currency picker for one item. Held per plan, so switching a pension to
+   euros here never rewrites what the Fact Find recorded — the Fact Find is the
+   record of what the client has; this is what we are modelling. */
+function cfCcyPick(id,cur,fact){
+  const list=CURRENCIES&&CURRENCIES.length?CURRENCIES:Object.keys(CF_GBP);
+  return '<select class="sel" data-cfc="'+esc(id)+'" style="padding:5px 24px 5px 8px;font-size:12px'
+    +(cur!==(fact||cur)?';border-color:var(--orange);font-weight:700':'')+'" '
+    +'title="'+(cur!==(fact||cur)?'Changed from '+esc(fact||'')+' for this plan':'From the Fact Find')+'">'
+    +list.map(k=>'<option value="'+esc(k)+'"'+(k===cur?' selected':'')+'>'+esc(k)+'</option>').join('')
+    +'</select>';
+}
+function cfNum(label,key,val,step,hint){
+  return '<div class="field"><label class="lbl">'+esc(label)+'</label>'
+    +'<input class="inp" type="number" step="'+(step||'0.1')+'" data-cf="'+key+'" value="'+esc(val)+'">'
+    +(hint?'<div class="hint">'+esc(hint)+'</div>':'')+'</div>';
+}
+function cfTabBody(c,s,res,tab){
+  const base=cfBase(c);
+  if(tab==='assume'){
+    let h='<div class="grid g3">'
+      +cfNum('Inflation % per year','inflation',s.inflation)
+      +'<div class="field"><label class="lbl">Show figures in</label>'
+      +'<select class="sel" data-cf="realTerms">'
+      +'<option value="1"'+(s.realTerms?' selected':'')+'>Today’s money (adjusted for inflation)</option>'
+      +'<option value="0"'+(!s.realTerms?' selected':'')+'>Future money (the actual figures in each year)</option>'
+      +'</select>'
+      +'<div class="hint">Today’s money keeps a forty-year chart readable and is how CashCalc shows it. The '
+      +'projection itself is the same either way.</div></div>'
+      +cfNum('Salary growth % per year','salaryGrowth',s.salaryGrowth)
+      +cfNum('Forecast to age','endAge',s.endAge,'1');
+    res.people.forEach(p=>{ h+=cfNum(p.name+' retires at age','retire_'+p.key,p.retireAge,'1'); });
+    h+=cfNum('Cash growth %','growCash',s.growCash)
+      +cfNum('Investment growth % (average)','growInvest',s.growInvest)
+      +cfNum('Pension growth % (average)','growPension',s.growPension)
+      +'<div class="field"><label class="lbl">Growth basis</label>'
+      +'<select class="sel" data-cf="basis">'
+      +'<option value="benchmark"'+(s.basis==='benchmark'?' selected':'')+'>Historic market pattern (variable, 1990–2024)</option>'
+      +'<option value="steady"'+(s.basis==='steady'?' selected':'')+'>Steady line (same % every year)</option>'
+      +'</select>'
+      +'<div class="hint">The pattern gives each year the shape of real markets — 2000–02, 2008 and 2022 included — '
+      +'rescaled so the long-run average still equals your growth assumption. Pick each pot’s pattern on the Pots tab.</div></div>'
+      +'</div>';
+
+    /* ---- charges ---- */
+    const fee=cfFeePct(s);
+    h+='<div class="hr"></div><div class="label mb-s">Charges</div><div class="grid g4">'
+      +cfNum('Platform fee %','feePlatform',s.feePlatform,'0.01')
+      +cfNum('Fund charges (OCF) %','feeOcf',s.feeOcf,'0.01')
+      +cfNum('Ongoing adviser fee %','feeAdviser',s.feeAdviser,'0.01')
+      +'<div class="field"><label class="lbl">Total each year</label>'
+      +'<div class="inp" style="background:var(--bg);font-weight:700">'+fee.toFixed(2)+'%</div></div></div>'
+      +'<div class="hint">The <b>default</b> for any pot that has not been given its own. Open a pot on the '
+      +'Pots tab to set what that plan actually charges — consolidating usually means three different sets of '
+      +'charges, and the difference between them is often the point of the exercise. Cash is never charged.</div>';
+
+    /* ---- before tax, said plainly ---- */
+    h+='<div class="note mut mt"><span class="ic">'+ic('info',15)+'</span><div>Every figure in this forecast is '
+      +'<b>before tax</b>. Income is shown gross, and withdrawals are taken from savings without any tax being '
+      +'deducted. Apply the client’s actual tax position when you discuss the numbers.</div></div>';
+
+    const ccys=cfCurrencies(c,s);
+    if(ccys.length){
+      h+='<div class="hr"></div><div class="label mb-s">Exchange rates into '+esc(base)+'</div><div class="grid g4">';
+      ccys.forEach(cc=>{
+        const def=((CF_GBP[cc]||1)/(CF_GBP[base]||1));
+        h+=cfNum('1 '+cc+' =','fx_'+cc,(s.fx[cc]!=null?s.fx[cc]:def.toFixed(3)),'0.001');
+        h+=cfNum(cc+' drift % / yr','fxd_'+cc,(s.fxDrift[cc]!=null?s.fxDrift[cc]:0),'0.1');
+      });
+      h+='</div><div class="hint">The rate today, and how much you assume it moves each year. Leave drift at 0 to hold '
+        +'the rate flat. A client who earns in one currency, holds pensions in another and will spend in a third is '
+        +'exposed to this for their whole retirement — it is worth putting a number on rather than ignoring.</div>';
+      const yrs=Math.max(1,(res.rows.length||1)-1);
+      const moved=ccys.filter(cc=>Number(s.fxDrift[cc]));
+      if(moved.length) h+='<div class="note mut" style="margin-top:8px"><span class="ic">'+ic('info',15)+'</span><div>'
+        +moved.map(cc=>{ const r0=cfRate(c,s,cc), r1=cfRateAt(c,s,cc,yrs);
+            return '<b>'+esc(cc)+'</b> '+r0.toFixed(3)+' → '+r1.toFixed(3)+' by '+(res.rows[res.rows.length-1].year); })
+          .join(' · ')+'</div></div>';
+    }
+    return h;
+  }
+  if(tab==='pots'){
+    const all=res.inp.allPots;
+    if(!all.length) return '<div class="empty"><h4>No pots yet</h4>'
+      +'<p>Cash, investments and pensions from the Fact Find appear here.</p></div>';
+    const bench=s.basis==='benchmark', defB=cfBenchFor(c);
+    const openId=S.cfPot||null;
+
+    /* A field inside the open panel. */
+    const F=(label,key,val,ph,hint,wide)=>'<div class="field'+(wide?' full':'')+'" style="margin:0">'
+      +'<label class="lbl">'+esc(label)+'</label>'
+      +'<input class="inp" data-cf="'+key+'" value="'+esc(val==null?'':val)+'"'
+      +(ph?' placeholder="'+esc(ph)+'"':'')+'>'
+      +(hint?'<div class="hint">'+esc(hint)+'</div>':'')+'</div>';
+    const SEL=(label,key,opts,cur)=>'<div class="field" style="margin:0"><label class="lbl">'+esc(label)+'</label>'
+      +'<select class="sel" data-cf="'+key+'">'
+      +opts.map(o=>'<option value="'+esc(o[0])+'"'+(String(cur)===String(o[0])?' selected':'')+'>'
+        +esc(o[1])+'</option>').join('')+'</select></div>';
+
+    let h='<div class="stack" style="gap:8px">';
+    all.forEach((pt,k)=>{
+      const on=!s.exclude[pt.id];
+      const isOpen=openId===pt.id;
+      const fee=cfFeeFor(s,pt.id), init=cfInitFee(s,pt.id);
+      const gOwn=(s.growth||{})[pt.id];
+      const gShown=(gOwn!=null&&gOwn!=='')?Number(gOwn)
+        :(pt.type==='cash'?Number(s.growCash):pt.type==='invest'?Number(s.growInvest):Number(s.growPension));
+      /* the one-line summary: what this pot is and what it costs */
+      const chips=[];
+      chips.push(money(pt.value,base));
+      if((pt.ccy||base)!==base) chips.push(esc(pt.ccy));
+      chips.push(gShown+'% growth');
+      if(pt.type!=='cash') chips.push(fee.toFixed(2)+'% charges');
+      if(init) chips.push(init.pct+'% initial');
+      chips.push(pt.type==='pension'?'accessible from '+(pt.accessAge||55):'accessible any time');
+
+      h+='<div class="card"'+(on?'':' style="opacity:.5"')+'><div class="card-b" style="padding:11px 13px">'
+        +'<div class="row wrapf" style="gap:10px;align-items:center">'
+        +'<input type="checkbox" data-cfx="'+pt.id+'"'+(on?' checked':'')+' title="Include in the forecast">'
+        +'<i style="display:inline-block;width:11px;height:11px;border-radius:2px;background:'+cfPal(k)+'" title="Colour on the chart"></i>'
+        +'<div style="flex:1;min-width:180px">'
+          +'<div class="b7">'+esc(pt.label)+'</div>'
+          +'<div class="tiny muted2">'+chips.map(esc).join(' · ')+'</div>'
+        +'</div>'
+        +'<button class="btn sm ghost" data-a="cfPot" data-v="'+esc(pt.id)+'">'
+        +(isOpen?'Close':'Open')+ic(isOpen?'chevD':'chev',13)+'</button>'
+        +'</div>';
+
+      if(isOpen){
+        h+='<div class="hr"></div><div class="grid g3">'
+          +F('Value','potval_'+pt.id,
+             ((s.potVal||{})[pt.id]!=null&&(s.potVal||{})[pt.id]!==''?(s.potVal||{})[pt.id]:''),
+             String(pt.native),'Blank uses the Fact Find figure ('+esc(pt.src)+')')
+          +SEL('Currency','ccy_'+pt.id,
+             (CURRENCIES&&CURRENCIES.length?CURRENCIES:Object.keys(CF_GBP)).map(k=>[k,k]),pt.ccy||base)
+          +F('Growth % a year','grow_'+pt.id,gOwn==null?'':gOwn,String(gShown),
+             'Blank uses the '+(pt.type==='cash'?'cash':pt.type==='invest'?'investment':'pension')+' rate from Assumptions')
+          +'</div>';
+        if(pt.type!=='cash'){
+          h+='<div class="grid g3 mt-s">'
+            +F('Ongoing charges % a year','fee_'+pt.id,
+               cfFeeCustom(s,pt.id)?fee:'',cfFeePct(s).toFixed(2),
+               'Everything this plan costs each year: platform, funds and your ongoing fee')
+            +F('Initial fee %','init_'+pt.id,init?init.pct:'','—',
+               'A one-off charge on this pot, taken in the first year')
+            +(bench?SEL('Return pattern','bench_'+pt.id,
+               Object.keys(CF_BENCH).map(k=>[k,CF_BENCH[k].name]),s.potBench[pt.id]||defB):'')
+            +(pt.type==='pension'?F('Accessible from age','access_'+pt.id,pt.accessOwn?pt.accessAge:'',String(pt.accessAge),
+               'The plan will not draw on it before this age. Blank uses the Fact Find access age, or 55.'):'')
+            +'</div>';
+        } else {
+          h+='<div class="hint">Cash is not charged a platform or fund fee.</div>';
+        }
+        h+='<div class="row wrapf tiny muted2" style="gap:14px;margin-top:10px">'
+          +'<span>Owner: '+(pt.owner==='a2'?'Applicant 2':'Applicant 1')+'</span>'
+          +'<span>From the Fact Find: '+esc(pt.src)+'</span>'
+          +'<span>'+(pt.type==='pension'?('Accessible from age '+(pt.accessAge||55)):'Accessible any time')+'</span>'
+          +(pt.wrapper?'<span>Wrapper: '+esc(pt.wrapper)+'</span>':'')
+          +'</div>';
+      }
+      h+='</div></div>';
+    });
+    h+='</div>';
+    h+='<div class="hint mt-s">Open a pot to set what it is actually worth, what currency it is in and what it '
+      +'costs. Anything left blank falls back to the figures on Assumptions, and the Fact Find is never changed '
+      +'by anything here. When money is needed the plan spends cash first, then investments, then pensions.</div>';
+    return h;
+  }
+  if(tab==='flows'){
+    /* the rate each line rises by — the column CashCalc prints beside every
+       income and expense, so nobody has to guess whether a figure is linked */
+    const inflOf=x=>x.kind==='salary'?'Salary growth ('+Number(s.salaryGrowth)+'%)'
+      :x.inflates?'Assumed ('+Number(s.inflation)+'%)':'Level (0%)';
+    let h='<div class="label mb-s">Income</div><div class="tw"><table class="t"><thead><tr><th>Include</th><th>Source</th>'
+      +'<th class="r">Per year</th><th>Currency</th><th class="r">In '+esc(base)+'</th><th>Inflation</th><th>When</th></tr></thead><tbody>';
+    res.inp.allIncomes.forEach((x,k)=>{
+      h+='<tr><td><input type="checkbox" data-cfx="'+x.id+'"'+(s.exclude[x.id]?'':' checked')+'></td>'
+        +'<td class="nm"><span class="row" style="gap:8px;align-items:center"><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+cfPal(k)+'"></i>'+esc(x.label)+'</span></td>'
+        +'<td class="r mu">'+money(x.native!=null?x.native:x.annual,x.ccy||base)+'</td>'
+        +'<td>'+cfCcyPick(x.id,x.ccy||base,x.factCcy)+'</td>'
+        +'<td class="r b7">'+money(x.annual,base)+'</td>'
+        +'<td class="mu tiny">'+esc(inflOf(x))+'</td>'
+        +'<td class="mu tiny">'+(x.untilAge!=null?'until age '+x.untilAge:x.fromAge!=null?'from age '+x.fromAge:'throughout')+'</td></tr>';
+    });
+    if(!res.inp.allIncomes.length) h+='<tr><td colspan="7" class="mu">No income recorded in the Fact Find yet.</td></tr>';
+    h+='</tbody></table></div>';
+    h+='<div class="label mb-s" style="margin-top:16px">Spending</div><div class="tw"><table class="t"><thead><tr><th>Item</th>'
+      +'<th class="r">Per year</th><th>Currency</th><th class="r">In '+esc(base)+'</th><th>Inflation</th><th>When</th></tr></thead><tbody>';
+    res.inp.spends.forEach(x=>{
+      const when=x.fromT!=null?'from retirement':x.years!=null?('for '+x.years+' more years'):'throughout';
+      h+='<tr><td class="nm">'+esc(x.label)+'</td>'
+        +'<td class="r mu">'+money(x.native!=null?x.native:x.annual,x.ccy||base)+'</td>'
+        +'<td>'+(x.native!=null?cfCcyPick(x.id,x.ccy||base,x.factCcy):'<span class="mu tiny">'+esc(base)+'</span>')+'</td>'
+        +'<td class="r b7">'+money(x.annual,base)+'</td>'
+        +'<td class="mu tiny">'+esc(inflOf(x))+'</td>'
+        +'<td class="mu tiny">'+when+'</td></tr>';
+    });
+    if(!res.inp.spends.length) h+='<tr><td colspan="6" class="mu">Nothing in Expenditure yet — fill in the four numbers on the Fact Find.</td></tr>';
+    h+='</tbody></table></div><div class="grid g2 mt">'
+      +cfNum('Mortgage payments stop after (years)','mortYears',res.inp.mortTerm,'1')
+      +cfNum('Loan payments stop after (years)','loanYears',res.inp.loanTerm,'1')+'</div>';
+    h+='<div class="hint mt-s">Amounts are today’s figures, before tax. Each line rises every year at the rate in its '
+      +'Inflation column'+(s.realTerms?'; because the forecast is shown in today’s money, a line that rises with '
+      +'inflation appears flat on the chart and in the yearly table — it is keeping pace, not standing still. Switch to '
+      +'future money on Assumptions to see the actual amounts in each year.':'.')+'</div>';
+    return h;
+  }
+  if(tab==='events'){
+    let h='<p class="small muted" style="margin-bottom:12px">One-off amounts in or out — an inheritance, a property sale, a lump sum from a pension, a wedding, a gift to the children.</p>';
+    h+=(s.events||[]).map((ev,i)=>'<div class="row wrapf" style="gap:8px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px">'
+      +'<span class="bdg '+(ev.dir==='out'?'warn':'ok')+'">'+(ev.dir==='out'?'Money out':'Money in')+'</span>'
+      +'<b>'+esc(ev.label||'Event')+'</b><span class="mu">'+esc(ev.year)+'</span>'
+      +'<span class="b7">'+money(ev.amount,ev.ccy||cfBase(c))+'</span>'
+      +'<button class="btn xs ghost danger sp" data-a="cfEvDel" data-v="'+i+'">'+ic('trash',13)+'</button></div>').join('');
+    h+='<div class="grid g4 mt"><div class="field"><label class="lbl">What</label><input class="inp" id="evLabel" placeholder="Inheritance"></div>'
+      +'<div class="field"><label class="lbl">Year</label><input class="inp" id="evYear" type="number" value="'+(new Date().getFullYear()+5)+'"></div>'
+      +'<div class="field"><label class="lbl">Amount</label><div class="row" style="gap:6px"><select class="sel" id="evCcy" style="width:84px">'+optsHTML(CURRENCIES,cfBase(c))+'</select><input class="inp" id="evAmt" type="number"></div></div>'
+      +'<div class="field"><label class="lbl">Direction</label><select class="sel" id="evDir"><option value="in">Money in</option><option value="out">Money out</option></select></div></div>'
+      +'<button class="btn pri" data-a="cfEvAdd">'+ic('plus',14)+' Add to the timeline</button>';
+    return h;
+  }
+  if(tab==='yearly'){
+    let h='<div class="tiny muted2 mb-s">'+(s.realTerms?'Today’s money — inflation-linked figures read flat because they keep pace with prices.'
+        :'Future money — the actual amounts in each year.')+'</div>'
+      +'<div class="tw" style="max-height:430px;overflow:auto"><table class="t"><thead><tr><th>Year</th><th>Age'+(res.people.length>1?'s':'')+'</th>'
+      +'<th class="r">Income</th><th class="r">Expenses</th><th class="r">Surplus / deficit</th><th class="r">Drawn from savings</th>'
+      +'<th class="r">Cash</th><th class="r">Investments</th><th class="r">Pensions</th><th class="r">Total savings</th></tr></thead><tbody>';
+    res.rows.forEach(r=>{
+      h+='<tr'+(r.shortfall>0?' style="background:var(--risk-t)"':'')+'><td>'+r.year+'</td>'
+        +'<td class="mu">'+res.people.map(p=>r.ages[p.key]).join(' & ')+'</td>'
+        +'<td class="r">'+money(r.income,res.base)+'</td><td class="r">'+money(r.expenses,res.base)+'</td>'
+        +'<td class="r" style="color:'+(r.net>=0?'var(--ok)':'var(--risk)')+'">'+money(r.net,res.base)+'</td>'
+        +'<td class="r mu">'+(r.drawn>0?money(r.drawn,res.base):'—')
+          +(r.shortfall>0?' <span class="tiny" style="color:var(--risk)" title="'
+            +esc((r.locked||[]).map(l=>l.label+' locked until age '+l.until).join('; ')||'nothing left to draw on')
+            +'">short '+money(r.shortfall,res.base)+(r.locked&&r.locked.length?' · locked':'')+'</span>':'')+'</td>'
+        +'<td class="r mu">'+money(r.cash,res.base)+'</td><td class="r mu">'+money(r.invest,res.base)+'</td>'
+        +'<td class="r mu">'+money(r.pension,res.base)+'</td><td class="r b7">'+money(r.total,res.base)+'</td></tr>';
+    });
+    h+='</tbody></table></div><div class="hint mt-s">All figures are before tax. A red row is a year the savings could not cover.</div>';
+    return h;
+  }
+  if(tab==='stress'){
+    let h='<div class="row wrapf" style="gap:10px;margin-bottom:14px">'
+      +'<div class="field" style="margin:0"><label class="lbl">Volatility % (how bumpy markets are)</label>'
+      +'<input class="inp" type="number" step="0.5" data-cf="vol" value="'+esc(s.vol)+'" style="width:130px"></div>'
+      +'<button class="btn pri" data-a="cfMc" style="align-self:flex-end">'+ic('sliders',14)+' Run 250 market simulations</button></div>';
+    if(CF_MC&&CF_MC.clientId===S.clientId){
+      const mc=CF_MC.mc;
+      h+='<div class="grid g3 mb">'
+        +cfKpi('Plans that never ran out','<span style="color:'+(mc.success>=85?'var(--ok)':mc.success>=60?'var(--warn)':'var(--risk)')+'">'+mc.success+'%</span>','of '+mc.n+' simulated markets')
+        +cfKpi('Middle outcome at the end',money(mc.band[mc.band.length-1].p50,res.base),'half do better, half worse')
+        +cfKpi('1-in-10 poor outcome',money(mc.band[mc.band.length-1].p10,res.base),'plan for this, hope for better')
+        +'</div>'
+        +cfChartSavings(res,mc);
+      /* what the bad cases actually look like */
+      h+='<div class="grid g3 mb-s mt">'
+        +cfKpi('1-in-20 outcome (VaR)',money(mc.var5,res.base),'one run in twenty ends below this')
+        +cfKpi('Average of that worst 5% (CVaR)',money(mc.cvar5,res.base),'how bad the bad cases really get')
+        +cfKpi('Worst fall along the way',Math.round(mc.worstDD*100)+'%','biggest drop from a previous high')
+        +'</div>';
+      if(mc.ruinYears.length){
+        const q=mc.ruinYears[Math.floor(mc.ruinYears.length/2)];
+        h+='<div class="note warn"><span class="ic">'+ic('alert',15)+'</span><div>Of the '
+          +mc.ruinYears.length+' runs that ran out, the typical one ran out in <b>'+q+'</b> '
+          +'(earliest '+mc.ruinYears[0]+').</div></div>';
+      }
+    } else h+='<div class="note mut"><span class="ic">'+ic('info',15)+'</span><div>Runs the same forecast 250 times with '
+      +'random market returns instead of a straight line, and counts how often the money lasts. The steady chart '
+      +'flatters every plan — this is the honest version.</div></div>';
+
+    /* ---- sequence of returns ---- */
+    h+='<div class="hr"></div><div class="row wrapf" style="gap:12px;align-items:flex-end;margin-bottom:10px">'
+      +'<div><div class="label">When the bad year lands</div>'
+      +'<div class="tiny muted2" style="max-width:560px">Two clients with the same average return can end up in very '
+      +'different places depending on <b>when</b> the fall happens. Early in retirement is worst: the pot never recovers '
+      +'ground it gives up while it is also being drawn on.</div></div>'
+      +'<div class="field" style="margin:0"><label class="lbl">Size of fall %</label>'
+      +'<input class="inp" type="number" step="5" data-cf="shockPct" value="'+esc(s.shockPct)+'" style="width:110px"></div>'
+      +'<button class="btn" data-a="cfSeq" style="align-self:flex-end">'+ic('chart',14)+' Test it</button></div>';
+    if(CF_SEQ&&CF_SEQ.clientId===S.clientId&&CF_SEQ.seq){
+      const q=CF_SEQ.seq;
+      h+='<div class="tw"><table class="t"><thead><tr><th>A '+q.pct+'% fall in…</th><th>Year</th>'
+        +'<th class="num">Left at the end</th><th class="num">Cost of the timing</th><th>Money runs out</th></tr></thead><tbody>';
+      q.runs.forEach(r=>{
+        h+='<tr><td>'+(r.off===0?'the year they retire':(r.off<0?Math.abs(r.off)+' years before retiring'
+              :r.off+' years into retirement'))+'</td>'
+          +'<td class="tiny muted2">'+r.year+'</td>'
+          +'<td class="num">'+money(r.end,res.base)+'</td>'
+          +'<td class="num" style="color:var(--risk)">'+money(r.cost,res.base)
+            +(r.yearsLost?' <span class="tiny">· '+r.yearsLost+'y earlier</span>':'')+'</td>'
+          +'<td class="tiny">'+(r.shortfallYear?'<span style="color:var(--risk)">'+r.shortfallYear+'</span>':'—')+'</td></tr>';
+      });
+      h+='</tbody></table></div>'
+        +'<div class="hint">Same plan, same fall, only the year differs. Compare the top and bottom rows — that gap '
+        +'is sequence risk, and it is the argument for holding enough cash to ride out the first years.</div>';
+    }
+
+    /* ---- currency stress ---- */
+    const fxList=cfCurrencies(c,s);
+    if(fxList.length){
+      h+='<div class="hr"></div><div class="row wrapf" style="gap:12px;align-items:flex-end;margin-bottom:10px">'
+        +'<div><div class="label">If the currencies move against them</div>'
+        +'<div class="tiny muted2" style="max-width:560px">A one-off move in every currency other than '+esc(base)
+        +'. This is the risk a UK-only tool cannot show: pensions in one currency, a life to pay for in another.</div></div>'
+        +'<button class="btn" data-a="cfFx" data-v="-20">−20%</button>'
+        +'<button class="btn" data-a="cfFx" data-v="-10">−10%</button>'
+        +'<button class="btn" data-a="cfFx" data-v="10">+10%</button></div>';
+      if(CF_FX&&CF_FX.clientId===S.clientId&&CF_FX.r){
+        const f=CF_FX.r;
+        h+='<div class="grid g3">'
+          +cfKpi('A '+f.pct+'% move',money(f.end,res.base),'left at the end')
+          +cfKpi('Against the plan as it stands',money(f.diff,res.base),
+                 f.diff<0?'worse':'better',f.diff<0)
+          +cfKpi('Money runs out',f.shortfallYear?String(f.shortfallYear):'never',
+                 f.baseShortfall?('was '+f.baseShortfall):'on this assumption',!!f.shortfallYear)
+          +'</div>';
+      }
+    }
+
+    /* ---- safe withdrawal ---- */
+    if(CF_SWR&&CF_SWR.clientId===S.clientId&&CF_SWR.swr){
+      const w=CF_SWR.swr;
+      h+='<div class="hr"></div><div class="grid g3">'
+        +cfKpi('Income the plan supports',money(w.amount,res.base)+'/yr',
+               w.rate?w.rate.toFixed(1)+'% of the pot at retirement':'')
+        +cfKpi('What they asked for',money(w.start,res.base)+'/yr',
+               w.amount>=w.start?'affordable':'more than the plan supports',w.amount<w.start)
+        +cfKpi('Difference',money(Math.abs(w.amount-w.start),res.base)+'/yr',
+               w.amount>=w.start?'headroom':'shortfall to close',w.amount<w.start)
+        +'</div><div class="hint">Found by running this client’s own plan repeatedly — their charges, state '
+        +'pension and dates — not a rule of thumb borrowed from someone else’s. Before tax.</div>';
+    } else h+='<div class="hr"></div><button class="btn" data-a="cfSwr">'+ic('scale',14)
+      +' What income would this plan actually support?</button>';
+    return h;
+  }
+  if(tab==='compare'){
+    const SCs=cfScenarios(c), act=cfActiveId(c);
+    if(SCs.length<2) return '<div class="empty"><div class="ei">'+ic('swap',22)+'</div>'
+      +'<h4>Only one plan so far</h4><p>Press <b>Another plan</b> above to copy this one, then change '
+      +'a retirement age, a growth rate, a spending figure — anything — and the two sit side by side here.</p></div>';
+    /* run every scenario on the same client */
+    const runs=SCs.map(x=>({sc:x,r:cfRun(c,cfSettings(c,x.id),false),s:cfSettings(c,x.id)}))
+      .filter(x=>x.r);
+    if(!runs.length) return '<div class="empty"><h4>Nothing to compare yet</h4></div>';
+    const best=runs.reduce((a,b)=>b.r.endTotal>a.r.endTotal?b:a);
+    const row=(label,fn,good)=>'<tr><td class="nm">'+esc(label)+'</td>'
+      +runs.map(x=>{ const v=fn(x); return '<td class="r'+(good&&good(x)?' b7':'')+'">'+v+'</td>'; }).join('')+'</tr>';
+    let h='<div class="tw"><table class="t"><thead><tr><th>&nbsp;</th>'
+      +runs.map(x=>'<th class="r">'+esc(x.sc.name)+(x.sc.id===act?' <span class="tiny muted2">(showing)</span>':'')+'</th>').join('')
+      +'</tr></thead><tbody>';
+    h+=row('Retires',x=>x.r.firstRetYear);
+    h+=row('Pot at retirement',x=>money(x.r.atRetirement,res.base));
+    h+=row('Left at the end',x=>money(x.r.endTotal,res.base),x=>x===best);
+    h+=row('Money runs out',x=>x.r.shortfallYear
+      ?'<span style="color:var(--risk)">'+x.r.shortfallYear+'</span>':'never');
+    h+=row('Drawn from savings over the plan',x=>money(x.r.totalDrawn,res.base));
+    h+=row('Charges each year',x=>cfFeePct(x.s).toFixed(2)+'%');
+    h+=row('Worst fall along the way',x=>Math.round(x.r.maxDD*100)+'%');
+    h+='</tbody></table></div>';
+    /* the difference against whichever plan is showing */
+    const cur=runs.find(x=>x.sc.id===act)||runs[0];
+    const others=runs.filter(x=>x!==cur);
+    if(others.length){
+      h+='<div class="grid g3 mt">'+others.map(x=>{
+        const d=x.r.endTotal-cur.r.endTotal;
+        return cfKpi(esc(x.sc.name)+' vs '+esc(cur.sc.name),
+          (d>=0?'+':'')+money(Math.abs(d),res.base).replace('-',''),
+          d>=0?'better off at the end':'worse off at the end',d<0);
+      }).join('')+'</div>';
+    }
+    h+='<div class="hint mt-s">Every plan is run against the same client — the same pots, the same people, the '
+      +'same Fact Find. Only the assumptions differ.</div>';
+    return h;
+  }
+  /* chart */
+  return '<div class="label mb-s">Cash flow forecast</div>'
+    +cfChartFlow(res)
+    +'<div class="hint mt-s">What comes in each year, stacked by source, against what goes out (the black line). '
+    +'The green block is the gap the savings fill; red is a gap the savings cannot fill.</div>'
+    +'<div class="hr"></div><div class="label mb-s">Savings over time</div>'
+    +cfChartSavings(res,null)
+    +'<div class="hint mt-s">Each pot at the end of each year, at your assumed growth rates. Below the line is the '
+    +'shortfall that has built up once the savings are gone. Use the stress test for how it behaves in real markets. '
+    +'All figures are before tax.</div>';
+}
+
+/* -------------------------------- wiring -------------------------------- */
+Object.assign(ACT,{
+  cashflowOpen(){ S.screen='cashflow'; S.cfTab='chart'; CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render(); window.scrollTo(0,0); },
+  cfTab(v){ S.cfTab=v; render(); },
+  /* one pot open at a time — the point is to see everything about it, not to
+     end up with six panels down the page */
+  cfPot(v){ S.cfPot=(S.cfPot===v)?null:v; render(); },
+  cfScen(v){
+    const c=getClient(S.clientId); if(!c) return;
+    c.cfActive=v; touch(c); save();
+    CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+  },
+  cfScenAdd(){
+    const c=getClient(S.clientId); if(!c) return;
+    const from=cfStore(c,cfActiveId(c));
+    const n=(c.scenarios||[]).length+2;
+    const sc={id:uid('sc'),name:'Plan '+n,cashflow:JSON.parse(JSON.stringify(from||{}))};
+    c.scenarios=(c.scenarios||[]).concat([sc]);
+    c.cfActive=sc.id; touch(c); save();
+    CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+    toast('Copied','"'+sc.name+'" starts as a copy of the one you were on. Change what you like — the Compare tab '
+      +'shows them side by side.',null,8000);
+  },
+  cfScenRename(){
+    const c=getClient(S.clientId); if(!c) return;
+    const id=cfActiveId(c); if(id==='base') return;
+    const sc=(c.scenarios||[]).find(x=>x.id===id); if(!sc) return;
+    let h=mHead('Name this plan','Something you would say out loud — “Retire at 60 in Cyprus”.');
+    h+='<div class="m-b"><div class="field"><label class="lbl">Name</label>'
+      +'<input class="inp" id="scName" value="'+esc(sc.name||'')+'"></div></div>'
+      +'<div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+      +'<button class="btn pri" data-a="cfScenRenameGo">Save</button></div>';
+    openModal(h);
+  },
+  cfScenRenameGo(){
+    const c=getClient(S.clientId); if(!c) return;
+    const sc=(c.scenarios||[]).find(x=>x.id===cfActiveId(c)); if(!sc) return;
+    const v=(($('#scName')||{}).value||'').trim();
+    if(v) sc.name=v.slice(0,60);
+    touch(c); save(); dismissModal(); render();
+  },
+  cfScenDel(){
+    const c=getClient(S.clientId); if(!c) return;
+    const id=cfActiveId(c); if(id==='base') return;
+    const sc=(c.scenarios||[]).find(x=>x.id===id);
+    c.scenarios=(c.scenarios||[]).filter(x=>x.id!==id);
+    c.cfActive='base'; touch(c); save();
+    CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+    toast('Removed','"'+((sc&&sc.name)||'That plan')+'" has gone. The Fact Find is untouched.');
+  },
+  cfMc(){
+    const c=getClient(S.clientId); if(!c) return;
+    toast('Simulating','250 market runs…');
+    setTimeout(()=>{ CF_MC={clientId:S.clientId,mc:cfMonteCarlo(c,cfSettings(c),250)}; render(); },30);
+  },
+  cfSeq(){
+    const c=getClient(S.clientId); if(!c) return;
+    toast('Testing','Running the plan with the fall at four different points…');
+    setTimeout(()=>{ CF_SEQ={clientId:S.clientId,seq:cfSequenceTest(c,cfSettings(c),[-5,0,5,10])}; render(); },30);
+  },
+  cfFx(v){
+    const c=getClient(S.clientId); if(!c) return;
+    const s=cfSettings(c);
+    const base=cfRun(c,s,false);
+    const r=cfRun(c,Object.assign({},s,{fxShockPct:Number(v),fxShockT:0}),false);
+    CF_FX={clientId:S.clientId,r:r&&base?{pct:Number(v),end:r.endTotal,
+      diff:r.endTotal-base.endTotal,shortfallYear:r.shortfallYear,baseShortfall:base.shortfallYear}:null};
+    render();
+  },
+  cfSwr(){
+    const c=getClient(S.clientId); if(!c) return;
+    toast('Searching','Finding the income this plan supports…');
+    setTimeout(()=>{ CF_SWR={clientId:S.clientId,swr:cfSafeWithdrawal(c,cfSettings(c))}; render(); },30);
+  },
+  cfEvAdd(){
+    const c=getClient(S.clientId); if(!c) return;
+    const label=($('#evLabel')||{}).value||'Event', year=+((($('#evYear')||{}).value)||0),
+      amount=+((($('#evAmt')||{}).value)||0), ccy=($('#evCcy')||{}).value, dir=($('#evDir')||{}).value;
+    if(!year||!amount){ toast('Almost','A year and an amount are needed.','warn'); return; }
+    const s=cfSettings(c);
+    cfSave(c,{events:s.events.concat([{label,year,amount,ccy,dir}])});
+    render();
+  },
+  cfEvDel(v){
+    const c=getClient(S.clientId); if(!c) return;
+    const s=cfSettings(c); const ev=s.events.slice(); ev.splice(+v,1);
+    cfSave(c,{events:ev}); render();
+  }
+});
+/* re-render after typing settles, putting the cursor back where it was */
+function cfRerenderSoon(ms){
+  clearTimeout(document.__cfT);
+  document.__cfT=setTimeout(()=>{
+    if(S.screen==='cashflow'&&document.activeElement&&document.activeElement.dataset
+      &&document.activeElement.dataset.cf!=null){
+      const ae=document.activeElement, key=ae.dataset.cf, pos=ae.selectionStart;
+      render();
+      const back=document.querySelector('[data-cf="'+key+'"]');
+      if(back){ back.focus(); try{ back.setSelectionRange(pos,pos); }catch(_){} }
+    } else if(S.screen==='cashflow') render(); },ms||700);
+}
+document.addEventListener('input',e=>{
+  const el=e.target;
+  if(el.dataset&&el.dataset.cf!=null&&S.screen==='cashflow'){
+    const c=getClient(S.clientId); if(!c) return;
+    const k=el.dataset.cf, v=el.value;
+    /* Everything inside an open pot: value, growth, charges, initial fee.
+       They all behave the same way — blank means "use the default". */
+    const pot=k.match(/^(potval|grow|fee|init|access)_(.+)$/);
+    if(pot){
+      const st=cfSettings(c);
+      const field=pot[1], id=pot[2];
+      const map={potval:'potVal',grow:'growth',fee:'fees',init:'initFee',access:'access'};
+      const store=JSON.parse(JSON.stringify(st[map[field]]||{}));
+      const blank=(v===''||v==null);
+      if(blank||(field==='init'&&Number(v)===0)) delete store[id];
+      /* typed as one number: hold it as the platform part and zero the rest,
+         so what the adviser sees is exactly what is charged */
+      else if(field==='fee') store[id]={platform:Number(v)||0,ocf:0,adviser:0};
+      else if(field==='init') store[id]={pct:Number(v)||0,year:0};
+      else store[id]=Number(v)||0;
+      cfSave(c,{[map[field]]:store});
+      cfRerenderSoon(700);
+      return;
+    }
+    if(k.indexOf('fx_')===0){ const s=cfSettings(c); s.fx[k.slice(3)]=Number(v); cfSave(c,{fx:s.fx}); }
+    else if(k.indexOf('fxd_')===0){ const s=cfSettings(c); const d=Object.assign({},s.fxDrift);
+      d[k.slice(4)]=v===''?0:Number(v); cfSave(c,{fxDrift:d}); }
+    else cfSave(c,{[k]:v===''?null:(/^-?\d+(\.\d+)?$/.test(v)?Number(v):v)});
+    cfRerenderSoon(700);
+  }
+});
+document.addEventListener('change',e=>{
+  const el=e.target;
+  if(!S.screen||S.screen!=='cashflow'||!el.dataset) return;
+  const c=getClient(S.clientId); if(!c) return;
+  if(el.dataset.cfx){
+    const s=cfSettings(c); const ex=Object.assign({},s.exclude);
+    if(el.checked) delete ex[el.dataset.cfx]; else ex[el.dataset.cfx]=true;
+    cfSave(c,{exclude:ex}); render();
+  }
+  else if(/^(ccy|bench)_/.test(el.dataset.cf||'')){
+    const m2=el.dataset.cf.match(/^(ccy|bench)_(.+)$/);
+    const st=cfSettings(c);
+    const map={ccy:'ccyOf',bench:'potBench'};
+    const store=Object.assign({},st[map[m2[1]]]||{});
+    store[m2[2]]=el.value;
+    cfSave(c,{[map[m2[1]]]:store});
+    CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+  }
+  else if(el.dataset.cfc){
+    const s=cfSettings(c); const m=Object.assign({},s.ccyOf);
+    m[el.dataset.cfc]=el.value;
+    cfSave(c,{ccyOf:m}); CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+  }
+  else if(el.dataset.cfb){
+    const s=cfSettings(c); const pb=Object.assign({},s.potBench);
+    pb[el.dataset.cfb]=el.value;
+    cfSave(c,{potBench:pb}); render();
+  }
+  else if(el.dataset.cf==='basis'){
+    cfSave(c,{basis:el.value}); render();
+  }
+  else if(el.dataset.cf==='realTerms'){
+    cfSave(c,{realTerms:Number(el.value)?1:0}); CF_MC=CF_SEQ=CF_SWR=CF_FX=null; render();
+  }
+});
+/* route the screen + add the button on the client page */
+const _renderCF=render;
+render=function(){
+  if(S.screen==='cashflow'){
+    $('#root').innerHTML='<div class="shell">'+railHTML()
+      +'<div class="main">'+topHTML()+storageBanner()+'<div class="page">'+screenCashflow()+'</div></div></div>';
+    return;
+  }
+  _renderCF();
+};
+const _screenClientCF=screenClient;
+screenClient=function(){
+  let h=_screenClientCF();
+  return h.replace('<button class="btn sm" data-a="filesOpen"',
+    '<button class="btn sm blue" data-a="cashflowOpen">'+ic('chart',14)+' Cashflow</button>'
+    +'<button class="btn sm" data-a="filesOpen"');
+};

@@ -1,0 +1,44 @@
+# Deploy config for the SJB Fact Find worker.
+#
+# Mirrors exactly what was already live, read off the deployed version with:
+#   npx wrangler versions view <id> --name sjb-factfind
+# Getting this wrong matters: `wrangler deploy` replaces the worker's whole
+# configuration, so a binding missing from this file is a binding removed
+# from the live service - and DB holds the client records.
+#
+# Deploy with:
+#   npx wrangler deploy --keep-vars
+#
+# --keep-vars stops wrangler deleting any plain-text vars added through the
+# dashboard. Secrets (SECRET, SETUP_CODE) are stored separately by Cloudflare
+# and survive a deploy on their own.
+
+name = "sjb-factfind"
+main = "worker.js"
+compatibility_date = "2026-08-22"
+workers_dev = true
+
+# Upload the file as it stands, which is what the dashboard editor does.
+# worker.js carries a dual CommonJS/browser shim -
+#   (typeof require==='function') ? require('./public/shared.js') : globalThis.SJB_SHARED
+# - so that the same source runs under Node for the self-hosted build. The
+# require branch is dead code in Workers, but esbuild tries to resolve it at
+# build time and fails. Skipping the bundler avoids that and keeps the
+# uploaded bytes identical to the file we tested.
+no_bundle = true
+
+# Without this, no_bundle makes wrangler walk the whole folder and upload
+# every .html and .txt sitting next to worker.js as extra modules. Only the
+# entry point should go up.
+find_additional_modules = false
+rules = []
+
+# The client records, forms, links and uploaded files.
+[[d1_databases]]
+binding = "DB"
+database_name = "sjb-factfind"
+database_id = "e039b67b-c489-4f51-8633-182ef2160a0f"
+
+# Workers AI, used by the document reader.
+[ai]
+binding = "AI"

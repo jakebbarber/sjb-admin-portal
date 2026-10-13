@@ -1,0 +1,141 @@
+<!doctype html><meta charset="utf-8"><title>reco + document reader test</title>
+<script>
+window.__runReco=async function(){
+  const L=[]; const say=s=>L.push(s);
+  const ok=(c,w)=>say((c?'  OK   ':'  FAIL ')+w);
+  const eq=(got,want,w)=>ok(String(got)===String(want),w+' → '+JSON.stringify(got)+(String(got)===String(want)?'':' (wanted '+JSON.stringify(want)+')'));
+  try{
+    const api2=document.createElement('iframe'); api2.src='/servertest.html'; api2.style.display='none'; document.body.appendChild(api2);
+    await new Promise(r=>api2.onload=r);
+    const H=api2.contentWindow; await H.__seedUser();
+    let jar=''; const ORIG=window.fetch.bind(window);
+    window.fetch=async(input,init)=>{
+      const url=typeof input==='string'?input:input.url;
+      if(!/^\/api\//.test(url)) return ORIG(input,init);
+      const h=new Headers(init&&init.headers||{}); if(jar) h.set('x-session',jar);
+      const res=await H.__handle(new Request(location.origin+url,{method:(init&&init.method)||'GET',headers:h,body:init&&init.body}));
+      const s2=res.headers.get('x-session'); if(s2) jar=s2; return res;
+    };
+    document.querySelector('#lgEmail').value='dion@sjb-global.com';
+    document.querySelector('#lgPass').value='correct horse battery';
+    document.querySelector('#loginForm button').click();
+    await new Promise(r=>setTimeout(r,700));
+    say('logged in');
+
+    /* ================= 1. the reader, on three file shapes ================= */
+    const grab=async(path,name,type)=>{
+      const b=await (await ORIG(path)).blob();
+      return new File([b],name,{type:type||'application/octet-stream'});
+    };
+    const WANT={
+      name:'Aviva Personal Pension Plan', policyNo:'AV-118822', ccy:'GBP',
+      value:214350.28, tvq:213900, tvqDate:'2026-07-14', bidOffer:0,
+      crystallised:'Uncrystallised', crystallisedPct:0, adviserFeePct:0.5, amc:1.05,
+      mpaa:'No', nmpa:55
+    };
+    for(const [file,label] of [['sample_loa.docx','Word'],['sample_loa.txt','text'],['sample_loa.pdf','PDF']]){
+      say('--- '+label+' ('+file+')');
+      const f=await grab('/'+file,file);
+      let doc;
+      try{ doc=await readDocument(f); }catch(e){ say('  read failed: '+e.message); continue; }
+      say('  kind='+doc.kind+' lines='+(doc.lines||[]).length+' tables='+(doc.tables||[]).length);
+      const found=extractScheme(doc);
+      const n=Object.keys(found).length;
+      say('  fields found = '+n+' / '+SCHEME_FIELDS.length+'  ['+Object.keys(found).join(', ')+']');
+      if(label==='Word'){
+        Object.keys(WANT).forEach(k=>eq((found[k]||{}).value,WANT[k],'  '+k));
+        ok(/flexi-access drawdown/i.test(((found.retOptionsUK||{}).value)||''),'  retOptionsUK reads sensibly');
+        ok(/Drawdown is not offered/i.test(((found.retOptionsNonUK||{}).value)||''),'  retOptionsNonUK is the non-UK answer');
+        ok(/beneficiary flexi-access/i.test(((found.deathUK||{}).value)||''),'  deathUK is the UK answer');
+        ok(/Lump sum only/i.test(((found.deathNonUK||{}).value)||''),'  deathNonUK is the non-UK answer');
+        ok(/BlackRock/.test(((found.fundSelection||{}).value)||''),'  fundSelection has the fund names');
+        ok(/41\.2%/.test(((found.performance||{}).value)||''),'  performance has the figures');
+        ok(/terminal bonus/i.test(((found.exitFee||{}).value)||''),'  exitFee mentions the bonus');
+        say('  where: value='+((found.value||{}).where||'')+', amc='+((found.amc||{}).where||''));
+      } else {
+        ok(n>=12,'  found at least 12 fields from '+label);
+        eq((found.policyNo||{}).value,'AV-118822','  policyNo');
+        eq((found.amc||{}).value,1.05,'  amc');
+      }
+    }
+
+    /* ================= 2. nothing is invented ================= */
+    say('--- a document that says nothing');
+    const empty=new File([new Blob(['Dear Sir,\n\nThank you for your letter. We will be in touch.\n\nYours faithfully\n'])],'nothing.txt');
+    const ed=await readDocument(empty);
+    const ef=extractScheme(ed);
+    ok(Object.keys(ef).length===0,'  found nothing in an unrelated letter (got '+Object.keys(ef).join(',')+')');
+
+    /* ================= 3. applying it to a client ================= */
+    say('--- apply to a client');
+    const c=blankClient();
+    c.data.meta={ffDate:'2026-08-25',ffCurrency:'GBP',adviser:'Dion Angove'};
+    c.data.personal.a1={title:'Mr',firstName:'James',surname:'Whitfield',dob:'1968-06-15',residence:'Spain'};
+    c.data.dcPensions=[{_id:uid('r'),owner:'Applicant 1',name:'Aviva Personal Pension',policyNo:'AV-118822',
+      ccy:'GBP',value:'214000',tvq:'214000',tvqDate:'2026-07-14',amc:'1.05',nmpa:'55'}];
+    c.data.recommendation={adviceType:'UK pension transfer (DB & DC)',busType:'UK Pension Transfer',
+      recoType:'New business',provider:'Novia Global',product:'International SIPP',ccy:'GBP',amount:'310500',
+      strategy:'Corrival Balanced Portfolio',initial:'3',ongoing:'1',platformFee:'0.34',platformCcy:'GBP',
+      platformInitial:'0.25',platformQuarterly:'75',feeComm:'Fee',feeSchedule:'Schedule B',
+      investCcy:'GBP',ocf:'0.30',dfmFee:'0.15',fiveYearReturn:'34.8',
+      regular:'500',regCcy:'GBP',regFrequency:'Monthly',regInitial:'1',regStrategy:'Corrival Balanced',
+      withdrawing:'Yes',withdrawAmount:'GBP 10,000',withdrawFrequency:'Annually',
+      pclsTiming:'After the initial charge is taken',incomeImmediate:'No',pclsImmediate:'Yes',
+      withdrawReason:'I am buying a house',
+      trustName:'SJB Trustees Ltd',trusteeCcy:'GBP',trusteeInitial:'500',trusteeAnnual:'450',
+      topupPolicyNo:'NG-99812',topupCcy:'GBP',topupAmount:'25000',
+      dbAiaWriter:'Paul Hunt',dbAiaCcy:'GBP',dbAiaCost:'1500',dbAiaPaid:'Yes',dbAiaInvoice:'Saved in the client folder'};
+    DB.clients.unshift(c); save(true); await new Promise(x=>setTimeout(x,400));
+    S.clientId=c.id; S.screen='client'; S.section='recommendation';
+
+    const f=await grab('/sample_loa.docx','sample_loa.docx');
+    const doc=await readDocument(f);
+    const found=extractScheme(doc);
+    S.flow={mode:'recoFound',docs:[{pid:c.data.dcPensions[0]._id,fileName:'sample_loa.docx',kind:doc.kind,
+      how:'chosen by the test',sure:1,
+      rows:SCHEME_FIELDS.filter(x=>x.id!=='dcReco').map(x=>({id:x.id,
+        value:(found[x.id]||{}).value==null?null:found[x.id].value,
+        where:(found[x.id]||{}).where||'',use:!!found[x.id]})),missing:[]}],failed:[]};
+    recoResultModal();
+    const mh=(document.querySelector('#modal')||{}).innerHTML||'';
+    ok(mh.indexOf('data-reco-use=')>=0,'  review modal lists the answers');
+    ok(mh.indexOf('AV-118822')>=0,'  review modal shows a real value');
+    ACT.recoApply();
+    const p=DB.clients.find(x=>x.id===c.id).data.dcPensions[0];
+    eq(p.fundSelection&&/BlackRock/.test(p.fundSelection),true,'  fundSelection written to the pension');
+    eq(p.retOptionsNonUK&&/not offered/i.test(p.retOptionsNonUK),true,'  retOptionsNonUK written');
+    eq(p.amc,'1.05','  amc written');
+    eq(p.mpaa,'No','  mpaa written');
+
+    /* ================= 4. it reaches the MADS, in the right cells ========== */
+    say('--- MADS values');
+    const V=madsValues(DB.clients.find(x=>x.id===c.id));
+    const show=k=>say('  '+k+' = '+JSON.stringify(V[k]));
+    ['Reco PREMIUM INVESTED','Reco SJB Initial Adviser fee %','Reco  SJB Ongoing Adviser Fee %',
+     'Reco Chosen Platform Annual Fee','Reco Aggregated Annual Total Expense Ratio','DFM AMC',
+     '5 year cumulative return','Reco Type of Recommendation','Fee or Commission?','Reco Trust Name',
+     'Reco DB AIA Report Writer Chosen','UK PI DC 1 Pension Name','UK PI DC 1 Value','UK PI DC 1 TVQ Amount',
+     'UK PI DC 1 Annual Charges','Annual Adviser % Fees 1','UK PI DC 1 - Crystallised/Uncrystallised',
+     'UK PI DC 1 Retirement Options - Is Flexi-acces drawdown available?','@Reco!B36','@Reco!B15','@Reco!B25',
+     '@Reco!B28','@Reco!B67','@Reco!B95','@Reco!C4','APPS OUT 1 - Reg Currency'].forEach(show);
+    ok(V['Reco PREMIUM INVESTED']===310500,'  premium is the investment amount, not a portfolio name');
+    ok(Math.abs(V['UK PI DC 1 Annual Charges']-0.0105)<1e-9,'  1.05% reaches the workbook as 0.0105');
+    ok(Math.abs(V['Reco  SJB Ongoing Adviser Fee %']-0.01)<1e-9,'  1% ongoing fee as 0.01');
+    ok(V['Investment Recommendation']===undefined,'  the amount no longer lands in the regular-contribution column');
+
+    /* the cell plan, against the real blank V.28 */
+    const b64=document.getElementById('madsB64').textContent.trim();
+    const bin=atob(b64); const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+    const blob=new Blob([bytes]);
+    const res=await buildMads(blob,DB.clients.find(x=>x.id===c.id),{calc:'full'});
+    say('  buildMads written='+res.written+' skipped='+res.skipped+' unmapped='+(res.unmapped||[]).length
+      +' map='+(res.mapInfo&&res.mapInfo.source));
+    const bad=(res.unmapped||[]).filter(h=>/^@/.test(h));
+    ok(bad.length===0,'  every @Sheet!Cell address resolved'+(bad.length?' — '+bad.join(', '):''));
+    window.__madsOut=res.blob;
+    say('  unmapped sample: '+(res.unmapped||[]).slice(0,8).join(' | '));
+  }catch(e){ L.push('ERR '+e.message+' @ '+(e.stack||'').split('\n').slice(1,4).join(' ~ ')); }
+  return L.join('\n');
+};
+</script>

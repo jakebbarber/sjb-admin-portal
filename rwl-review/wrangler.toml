@@ -1,0 +1,46 @@
+# RWL Review — Cloudflare Worker config.
+#
+# No account IDs live in this file on purpose: `wrangler deploy` uses whichever
+# Cloudflare account you are logged in to (`npx wrangler login`). Before the
+# first deploy, create the two resources in that account and paste the D1 id:
+#
+#   npx wrangler d1 create rwl-review          -> database_id below
+#   npx wrangler r2 bucket create rwl-review-docs
+#
+# Secrets (never in this file, never in git):
+#   npx wrangler secret put ANTHROPIC_API_KEY   # from the Anthropic Console
+#   npx wrangler secret put SESSION_SECRET      # any long random string
+#   npx wrangler secret put PORTAL_PASSCODE     # sandbox sign-in only; remove once Access is on
+#
+# Sandbox: copy .dev.vars.example to .dev.vars and run `npx wrangler dev`.
+
+name = "rwl-review"
+main = "src/worker.js"
+compatibility_date = "2026-08-22"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+# the admin page is imported into the Worker as text
+rules = [{ type = "Text", globs = ["**/*.html"] }]
+
+[vars]
+# Shown in Word as the author of every tracked change
+AUTHOR = "RWL Review – draft for adviser"
+# Days a case (and its files) is kept before the nightly purge removes it
+RETENTION_DAYS = "30"
+# Production sign-in: set both to switch to Cloudflare Access (Microsoft 365 login)
+# ACCESS_TEAM = "yourteam"            # <yourteam>.cloudflareaccess.com
+# ACCESS_AUD  = "<application audience tag from the Access app>"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rwl-review"
+database_id = "REPLACE-WITH-ID-FROM-wrangler-d1-create"
+
+[[r2_buckets]]
+binding = "DOCS"
+bucket_name = "rwl-review-docs"
+
+# nightly purge of cases older than RETENTION_DAYS
+[triggers]
+crons = ["15 2 * * *"]

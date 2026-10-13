@@ -1,0 +1,238 @@
+/* ===========================================================================
+   BUILT SUMMARIES — the Apps Out narrative blocks, assembled from the record
+   by plain code.
+
+   Most of what the MADS asks for is not really writing: the retirement
+   paragraph is fixed wording with one branch, and the objectives are a menu
+   to choose from. Code does that instantly, the same way every time, with
+   nothing leaving the portal. The assistant is kept for the parts that are
+   genuinely prose — and for polishing these once they exist.
+   ========================================================================= */
+
+function sumCtx(c){
+  const base=cfBase(c);
+  const P=c.data.personal||{}, a=P.a1||{}, b=P.a2||{};
+  const R=(c.data.retirement||{}).a1||{}, R2=(c.data.retirement||{}).a2||{};
+  const Q=(c.data.risk||{}).a1||{}, J=c.data.journey||{}, r=recOf(c);
+  let res=null; try{ res=cfRun(c,cfSettings(c),false); }catch(e){}
+  return {base,a,b,R,R2,Q,J,r,res,
+    name:a.firstName||clientName(c).split(' ')[0]||'you',
+    onTrack:r.retirementOnTrack||(res?(res.shortfallYear?'Not on track':'On track'):'')};
+}
+const sumJoin=(arr)=>arr.filter(Boolean).join('\n');
+
+/* ---- 1. retirement goals: your two paragraphs, verbatim, with the branch --- */
+function buildRetirementNarrative(c){
+  const x=sumCtx(c);
+  const onTrack=x.onTrack==='On track';
+  const head=onTrack
+    ? 'Based on your financial goals, your current assets and projected savings contributions, you are on track to meet your retirement goals. The following areas can be discussed:'
+    : 'Based on your financial goals, your current assets and projected savings contributions, you are not on track to meet your retirement goals. The following areas can be discussed:';
+  const points=onTrack
+    ? ['- Estate planning to pass excess assets onto loved ones when you pass away',
+       '- Different income strategies you could adopt in retirement',
+       '- Tax planning opportunities (depending on where you retire)',
+       '- Other important areas are also reviewing your existing portfolio to check the following:',
+       '   o Taxation status','   o Asset allocation','   o Performance of investments','   o Charges']
+    : ['- Reducing your income requirement in retirement',
+       '- Reducing your expenses so you can save more',
+       '- Increasing your risk',
+       '- Increasing the age that you retire'];
+  /* a line of evidence from the forecast, where we have one */
+  let evidence='';
+  if(x.res){
+    const p0=x.res.people[0];
+    evidence=onTrack
+      ? 'Your cashflow forecast shows savings of '+money(x.res.atRetirement,x.base)+' at retirement in '
+        +x.res.firstRetYear+', lasting beyond age '+cfSettings(c).endAge+'.'
+      : 'Your cashflow forecast shows savings of '+money(x.res.atRetirement,x.base)+' at retirement in '
+        +x.res.firstRetYear+', with the funds exhausted by '+x.res.shortfallYear+' (age '
+        +(x.res.shortfallYear-p0.by)+').';
+  }
+  return sumJoin([ (onTrack?'On track to meet your retirement goals':'Not on track to meet your retirement goals'),
+    '', head, '', points.join('\n'), evidence?('\n'+evidence):'' ]);
+}
+
+/* ---- 2. main objectives: choose from your menu by advice type and facts ---- */
+const OBJ_MENU={
+  pension:['- You would like flexible drawdown',
+    '- Alternative currency options',
+    '- You plan to retire outside of the UK and would like to receive advice throughout retirement from someone who understands cross border issues',
+    '- Consolidating your pensions into one pot',
+    '- Increasing flexibility on your death benefit options as you only have the option of a cash lump sum on death',
+    '- Greater investment options'],
+  db:['- Reduced life expectancy','- Option to outperform inflation',
+    '- Flexibility over the age you retire','- Protecting against foreign inflation'],
+  coa:['- Reduce your ongoing fees','- Reduce exposure to structured notes when matured',
+    '- Improve your investment performance','- Change your investment strategy',
+    '- Provide more of a holistic service'],
+  gia:['- Improve your investment performance','- Greater investment options',
+    '- Option to outperform inflation','- Provide more of a holistic service',
+    '- Receiving advice throughout retirement'],
+  isa:["- Consolidate your ISAs into one pot making it easier to manage your portfolio and see how it is performing",
+    '- Move your cash ISAs into a stocks and shares ISA to get better growth',
+    '- Invest £20,000 into an ISA to make use of your ISA allowance for the current tax year',
+    '- Invest £20,000 into an ISA to make use of your ISA allowance for all future tax years']
+};
+function buildMainObjectives(c){
+  const x=sumCtx(c);
+  const type=String(x.r.adviceType||'');
+  const out=[];
+  const nPens=(c.data.dcPensions||[]).length, nDb=(c.data.dbPensions||[]).length;
+  const retiringAbroad=x.R.retireCountry&&x.R.retireCountry!=='United Kingdom';
+  const pick=(list,test)=>list.forEach((line,i)=>{ if(!test||test(i)) out.push(line); });
+
+  if(/pension/i.test(type)){
+    pick(OBJ_MENU.pension,i=>{
+      if(i===2) return !!retiringAbroad;            /* retiring outside the UK */
+      if(i===3) return nPens>1;                     /* consolidating only if several */
+      return true;
+    });
+    if(nDb>0) out.push('', ...OBJ_MENU.db);
+  }
+  else if(/change of adviser|coa/i.test(type)) pick(OBJ_MENU.coa);
+  else if(/gia/i.test(type)) pick(OBJ_MENU.gia,i=>i!==4||!!retiringAbroad);
+  else if(/isa/i.test(type)) pick(OBJ_MENU.isa,i=>i<2||true);
+  else {
+    /* lump sum or unspecified — take what the facts support */
+    if(nPens>1) out.push('- Consolidating your pensions into one pot');
+    out.push('- Improve your investment performance','- Greater investment options');
+    if(retiringAbroad) out.push('- Receiving advice throughout retirement from someone who understands cross border issues');
+    out.push('- Provide more of a holistic service');
+  }
+  /* anything the client told us in their own words is worth carrying over */
+  if(x.J.priorities) out.push('','In their own words: “'+String(x.J.priorities).trim()+'”');
+  return out.join('\n');
+}
+
+/* ---- 3. lump sum: the questions the sheet asks, answered from the record --- */
+function buildLumpSumFactors(c){
+  const x=sumCtx(c), r=x.r, L=[];
+  if(x.J.priorities) L.push('In your own words: “'+String(x.J.priorities).trim()+'”');
+  else if(x.J.adviserSummary) L.push(String(x.J.adviserSummary).trim());
+  const amt=r.amount?money(r.amount,r.ccy||x.base):'';
+  if(r.product||amt) L.push('',
+    'You are investing '+(amt||'this money')+(r.source?' from '+String(r.source).trim():'')
+    +(r.product?' into '+r.product+(r.provider?' with '+r.provider:''):'')+'.');
+  if(r.discounted) L.push('','Other options were considered. '+String(r.discounted).trim());
+  else if(x.a.residence&&x.a.residence!=='United Kingdom') L.push('',
+    'Products available locally in '+x.a.residence+' were considered. [Set out why the recommended product was '
+    +'chosen instead — this is the comparison the file needs.]');
+  if(x.Q.atrChosen&&r.strategy) L.push('',
+    'Your attitude to risk is '+x.Q.atrChosen+(x.Q.atrScore?' (score '+x.Q.atrScore+' out of 40)':'')
+    +', and the recommended strategy is '+r.strategy+'.');
+  if(r.initial||r.ongoing) L.push('',
+    'The charges are '+[r.initial?r.initial+'% initial':'',r.ongoing?r.ongoing+'% a year ongoing':'']
+      .filter(Boolean).join(' and ')
+    +(r.amount&&r.initial?' ('+money(Number(r.amount)*Number(r.initial)/100,r.ccy||x.base)+' initially)':'')
+    +'. [Confirm why you are content with these charges relative to the service and alternatives.]');
+  L.push('','[Add: any tax planning the product allows in your country of residence.]');
+  return L.join('\n');
+}
+
+/* ---- 4. UK advice paragraph: a structured skeleton from the record -------- */
+function buildUkNarrative(c){
+  const x=sumCtx(c), r=x.r, L=[];
+  const who=x.name;
+  const parts=[];
+  if(x.R.retireCountry||x.R.retireAge) parts.push(
+    who+' plans to retire'+(x.R.retireAge?' at age '+x.R.retireAge:'')
+    +(x.R.retireCountry?' in '+x.R.retireCountry:'')
+    +(x.R.desiredIncome?', with a target net income of '+money(x.R.desiredIncome,x.R.incomeCcy||x.base)+' a year':'')+'.');
+  if(r.provider||r.product) parts.push(
+    'I have recommended '+[r.product,r.provider?'with '+r.provider:''].filter(Boolean).join(' ')
+    +(r.strategy?', invested in the '+r.strategy:'')+'.'
+    +(r.discounted?' '+String(r.discounted).trim():' [Set out which providers were discounted and why.]'));
+  if(x.res){
+    parts.push('The cashflow forecast shows savings of '+money(x.res.startTotal,x.base)+' today and '
+      +money(x.res.atRetirement,x.base)+' at retirement in '+x.res.firstRetYear+'. '
+      +(x.res.shortfallYear
+        ? 'On the current assumptions the funds are exhausted by '+x.res.shortfallYear
+          +', which is why the areas set out above were discussed.'
+        : 'On the current assumptions the plan remains sustainable to age '+cfSettings(c).endAge+'.'));
+  }
+  const pots=[];
+  (c.data.dcPensions||[]).forEach(p=>{ if(Number(p.value)>0) pots.push((p.name||'the pension')+' ('+money(p.value,p.ccy||x.base)+')'); });
+  (c.data.investments||[]).forEach(p=>{ if(Number(p.value)>0) pots.push((p.provider||'the investment')+' ('+money(p.value,p.ccy||x.base)+')'); });
+  const sps=(c.data.statePensions||[]).filter(p=>Number(p.amount)>0);
+  if(pots.length||sps.length) parts.push(
+    'Retirement income will be funded from '+(pots.length?pots.join(', '):'the accumulated pots')
+    +(sps.length?', alongside state pension entitlement of '
+      +sps.map(p=>money(p.amount,p.ccy||x.base)+' a year from age '+(p.spa||'state pension age')).join(' and '):'')+'.');
+  L.push(parts.join(' '));
+  L.push('','[Add anything else discussed at the meeting that belongs on file.]');
+  return L.join('\n');
+}
+
+const SUM_BUILDERS={
+  lumpSumFactors:buildLumpSumFactors,
+  retirementNarrative:buildRetirementNarrative,
+  mainObjectives:buildMainObjectives,
+  ukNarrative:buildUkNarrative
+};
+
+/* ------------------------------ the panel -------------------------------- */
+const _extraPanelS=extraPanel;
+extraPanel=function(c,s){
+  if(s.id!=='recommendation') return _extraPanelS(c,s);
+  const r=recOf(c);
+  let res=null; try{ res=cfRun(c,cfSettings(c),false); }catch(e){}
+  const track=r.retirementOnTrack||(res?(res.shortfallYear?'Not on track':'On track'):null);
+  return '<div class="hr"></div>'
+    +'<div class="row wrapf" style="gap:9px;margin-bottom:8px"><span style="color:var(--orange)">'+ic('file',17)+'</span>'
+    +'<b>Build the four MADS boxes</b>'
+    +(track?'<span class="bdg '+(track==='On track'?'ok':'warn')+'"><span class="dot"></span>cashflow says '+esc(track.toLowerCase())+'</span>':'')
+    +'</div>'
+    +'<div class="row wrapf" style="gap:7px">'
+    +AI_BOXES.map(x=>'<button class="btn sm" data-a="sumBuild" data-v="'+x.f+'">'
+      +ic('check',14)+' '+esc(x.label)+(r[x.f]?' · rebuild':'')+'</button>').join('')
+    +'<button class="btn sm pri" data-a="sumBuildAll">'+ic('check',14)+' Build all four</button>'
+    +'</div>'
+    +'<div class="note mut mt-s"><span class="ic">'+ic('info',15)+'</span><div>Built from this client’s record by the '
+    +'portal itself — instantly, identically every time, and nothing leaves your server. The retirement paragraph '
+    +'uses the network’s wording and picks the on-track or not-on-track branch from the cashflow. Anything in '
+    +'<b>[square brackets]</b> is a prompt for you to complete.</div></div>'
+    +'<div class="row wrapf mt-s" style="gap:7px;align-items:center">'
+    +'<span class="tiny muted">Want it in flowing prose instead?</span>'
+    +AI_BOXES.map(x=>'<button class="btn xs" data-a="aiDraft" data-v="'+x.f+'">'+esc(x.label.split(' ')[1]||x.label)+'</button>').join('')
+    +'<button class="btn xs dark" data-a="aiPolish">'+ic('sliders',13)+' Polish what is there</button>'
+    +'</div>';
+};
+
+Object.assign(ACT,{
+  sumBuild(v){
+    const c=getClient(S.clientId); if(!c) return;
+    const fn=SUM_BUILDERS[v]; if(!fn) return;
+    c.data.recommendation=c.data.recommendation||{};
+    c.data.recommendation[v]=fn(c);
+    touch(c); render();
+    toast('Built','Read it through and fill in anything in square brackets.',null,6000);
+  },
+  sumBuildAll(){
+    const c=getClient(S.clientId); if(!c) return;
+    c.data.recommendation=c.data.recommendation||{};
+    Object.keys(SUM_BUILDERS).forEach(k=>{ c.data.recommendation[k]=SUM_BUILDERS[k](c); });
+    if(!c.data.recommendation.retirementOnTrack){
+      let res=null; try{ res=cfRun(c,cfSettings(c),false); }catch(e){}
+      if(res) c.data.recommendation.retirementOnTrack=res.shortfallYear?'Not on track':'On track';
+    }
+    touch(c); render();
+    toast('All four built','Check each one and complete anything in square brackets before this reaches a file.',null,8000);
+  },
+  async aiPolish(){
+    const c=getClient(S.clientId); if(!c) return;
+    const r=recOf(c);
+    const has=AI_BOXES.filter(x=>r[x.f]&&String(r[x.f]).trim());
+    if(!has.length){ toast('Nothing to polish yet','Build the boxes first, then polish.','warn'); return; }
+    toast('Polishing','Turning the built text into prose…');
+    let done=0;
+    for(const box of has){
+      try{
+        const text=await api('POST','/api/ai',{kind:'polish',facts:aiFacts(c),draft:String(r[box.f]).slice(0,4000)});
+        if(text&&text.text){ c.data.recommendation[box.f]=text.text; done++; }
+      }catch(e){}
+    }
+    touch(c); render();
+    toast(done?'Polished':'Could not polish',done?(done+' section'+(done===1?'':'s')+' rewritten — check every figure survived.'):'The assistant did not respond.',done?null:'warn',8000);
+  }
+});

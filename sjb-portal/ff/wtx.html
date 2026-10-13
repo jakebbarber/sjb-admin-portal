@@ -1,0 +1,689 @@
+/* ===========================================================================
+   MEETING TRANSCRIPT → FACT FIND
+
+   The adviser records the meeting, drops the transcript in, and the Fact Find
+   is filled from what the client actually said.
+
+   A conversation is not a form, so this is work for the assistant — but an
+   assistant left to itself will happily invent a pension. So nothing it says
+   is believed until it is checked here, in code:
+
+     1. every answer must carry the exact words it was taken from, and those
+        words must really be in the transcript, or the answer is thrown away;
+     2. a figure must appear in its own quote, or it is flagged;
+     3. words spoken by the ADVISER about themselves are not client facts, so
+        anything whose evidence sits in the adviser's turn is flagged;
+     4. nothing replaces what is already in the Fact Find unless it is ticked;
+     5. nothing at all is saved until the adviser has seen it and pressed Apply.
+
+   The transcript itself is not stored on the client record.
+   ========================================================================= */
+
+/* ------------------------- what can be filled ---------------------------- */
+/* [section, field, what to ask for]. Labels, types and lists come from the
+   schema, so a field renamed there is renamed here. */
+const TX_SINGLE=[
+  ['personal','title','their title'],
+  ['personal','firstName','first name'],
+  ['personal','middleName','middle name or names'],
+  ['personal','surname','surname'],
+  ['personal','dob','date of birth, only if the full date is said'],
+  ['personal','marital','marital status'],
+  ['personal','nationality','nationality'],
+  ['personal','birthCountry','country they were born in'],
+  ['personal','mobile','mobile phone number'],
+  ['personal','email','email address'],
+  ['personal','residence','country they live in now'],
+  ['personal','taxResidence','country they are tax resident in'],
+  ['personal','taxResidentSince','the year they became tax resident there'],
+  ['personal','leftUK','date they left the UK, only if the full date is said'],
+  ['personal','ukCitizen','whether they are a UK citizen'],
+  ['personal','returnUK','whether they intend to return to the UK'],
+  ['personal','health','their state of health'],
+  ['personal','healthNotes','any health conditions they mention, in their words'],
+  ['personal','smoker','whether they smoke'],
+  ['employment','status','employment status'],
+  ['employment','occupation','occupation or job title'],
+  ['employment','employer','employer name'],
+  ['employment','industry','industry they work in'],
+  ['employment','salary','gross annual salary'],
+  ['employment','salaryCcy','currency of the salary, as a 3-letter code'],
+  ['employment','bonus','gross annual bonus'],
+  ['employment','prevOccupation','previous occupation if they are retired'],
+  ['employment','changes','any changes to work or income they expect'],
+  ['journey','priorities','their financial priorities, in their own words'],
+  ['journey','motivation','their biggest financial motivation right now, in their own words'],
+  ['journey','plan05','their plans for the next 0 to 5 years, in their own words'],
+  ['journey','plan510','their plans for 5 to 10 years from now, in their own words'],
+  ['journey','plan10','their plans for 10 or more years from now, in their own words'],
+  ['retirement','retireCountry','country they intend to retire in'],
+  ['retirement','retireAge','age they intend to retire'],
+  ['retirement','desiredIncome','annual income they want in retirement'],
+  ['retirement','incomeCcy','currency of that income, as a 3-letter code'],
+  ['retirement','currentIncome','current annual retirement income if already retired'],
+  ['retirement','care','their thoughts on long-term care'],
+  ['estate','will','whether they have a will'],
+  ['estate','willCountry','country the will was made in'],
+  ['estate','willCurrent','whether the will is up to date'],
+  ['estate','willProvision','who the will leaves things to'],
+  ['estate','poa','whether anyone holds power of attorney for them'],
+  ['estate','poaWho','who holds the power of attorney'],
+  ['estate','inheritance','whether they expect to inherit anything'],
+  ['estate','inheritanceWhen','roughly when they expect the inheritance'],
+  ['estate','inheritanceAmount','roughly how much they expect to inherit'],
+  ['incomeExp','expTotal','total regular living expenditure per YEAR (not per month)'],
+  ['incomeExp','expMortgage','mortgage or rent payments per YEAR'],
+  ['incomeExp','expLoans','loan repayments per YEAR'],
+  ['incomeExp','savings','regular savings per YEAR, excluding pensions'],
+  ['risk','experience','their investment experience'],
+  ['risk','objective','their investment objective'],
+  ['risk','horizon','their investment time horizon'],
+  ['risk','withdrawIncome','whether they intend to withdraw income from the investment'],
+  ['risk','exclusions','any investments they want excluded']
+];
+/* [list, the field that names the thing, the fields worth asking for] */
+const TX_LISTS=[
+  ['properties','location',['type','location','ccy','value','purchased','purchasePrice','mortgage','rental','notes'],'a property they own'],
+  ['cash','bank',['bank','type','ccy','amount'],'a bank or savings account'],
+  ['investments','provider',['provider','type','ccy','value','contribution'],'an investment such as an ISA, bond or share account'],
+  ['dcPensions','name',['name','type','policyNo','ccy','value','personalContrib','employerContrib'],'a personal, workplace or SIPP pension with a pot value'],
+  ['dbPensions','name',['name','status','nra','ccy','income'],'a final salary or defined benefit pension'],
+  ['statePensions','country',['country','years','spa','inPayment','ccy','amount'],'a state pension'],
+  ['liabilities','lender',['type','lender','ccy','balance','rate','term'],'a loan or credit card'],
+  ['dependants','name',['name','dob','relationship','dependent'],'a child or other family member'],
+  ['protection','provider',['provider','type','ccy','sumAssured','premium'],'a life, health or income protection policy']
+];
+function txSection(id){ return SECTIONS.find(s=>s.id===id)||null; }
+function txFieldDef(sec,id){
+  const s=txSection(sec); if(!s) return null;
+  return (s.fields||s.cols||[]).find(x=>x.id===id)||null;
+}
+/* what a field may hold, said briefly enough for a prompt */
+function txAskFor(fd,base){
+  let a=base||fd.label;
+  if(fd.type==='number') a+=' (a number)';
+  else if(fd.type==='date') a+=' (YYYY-MM-DD)';
+  else if(fd.type==='select'){
+    const list=Array.isArray(fd.list)?fd.list:listFor(fd.list);
+    if(list.length&&list.length<=9) a+=' (one of: '+list.join(', ')+')';
+    else if(fd.list==='country') a+=' (the country name)';
+    else if(fd.list==='currency') a+=' (GBP, EUR, USD …)';
+  }
+  return a;
+}
+function txWant(){
+  return TX_SINGLE.map(([sec,id,ask])=>{ const fd=txFieldDef(sec,id); return fd?{id:sec+'.'+id,ask:txAskFor(fd,ask)}:null; }).filter(Boolean);
+}
+function txWantLists(){
+  return TX_LISTS.map(([list,key,ids,what])=>({id:list,
+    ask:what+'. Fields: '+ids.map(id=>{ const fd=txFieldDef(list,id); return fd?id+' = '+txAskFor(fd):null; }).filter(Boolean).join('; ')}));
+}
+
+/* ------------------------------ reading it ------------------------------ */
+/* Turn the file into speaker turns. Handles a Teams export ("Name  0:06Text"),
+   a plain "Name: text" script and a .vtt caption file; anything else is read
+   as one long turn, so it still works, just without knowing who said what. */
+function txParse(lines){
+  lines=(lines||[]).map(x=>String(x).replace(/ /g,' ').trim()).filter(Boolean);
+  /* .vtt: drop the header and cue timings, keep the voice tags */
+  if(/^WEBVTT/i.test(lines[0]||'')){
+    const out=[]; let t='';
+    lines.slice(1).forEach(l=>{
+      const cue=/^(\d{1,2}:)?(\d{2}):(\d{2})[.,]\d+\s+-->/.exec(l);
+      if(cue){ t=(cue[1]?String(parseInt(cue[1],10))+':':'')+(cue[1]?cue[2]:String(parseInt(cue[2],10)))+':'+cue[3]; return; }
+      if(/^\d+$/.test(l)||/^NOTE\b/.test(l)) return;
+      const v=/^<v\s+([^>]+)>(.*?)(<\/v>)?$/.exec(l);
+      if(v) out.push(v[1].trim()+' '+t+' '+v[2].trim()); else out.push(l.replace(/<[^>]+>/g,''));
+    });
+    lines=out;
+  }
+  const TEAMS=/^([A-Za-z][^\d:]{1,58}?)\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*(\S.*)?$/;
+  const SCRIPT=/^([A-Z][A-Za-z.'\- ]{1,40}):\s+(\S.*)$/;
+  const nameish=n=>{ const w=n.trim().split(/\s+/); return w.length>=1&&w.length<=4&&w.every(x=>/^[A-Z][A-Za-z.'\-]*$/.test(x)); };
+  /* a name only counts as a speaker if it speaks more than once — otherwise
+     "We met at 10:30 to discuss" would make "We met at" a person */
+  const count={};
+  lines.forEach(l=>{ const m=TEAMS.exec(l)||SCRIPT.exec(l); if(m&&nameish(m[1])) count[m[1].trim()]=(count[m[1].trim()]||0)+1; });
+  const known=n=>nameish(n)&&count[n.trim()]>=2;
+  const turns=[];
+  lines.forEach(l=>{
+    let m=TEAMS.exec(l);
+    if(m&&known(m[1])){ turns.push({speaker:m[1].trim(),t:m[2],text:(m[3]||'').trim()}); return; }
+    m=SCRIPT.exec(l);
+    if(m&&known(m[1])){ turns.push({speaker:m[1].trim(),t:'',text:m[2].trim()}); return; }
+    if(/ (started|stopped) transcription$/i.test(l)) return;
+    if(turns.length) turns[turns.length-1].text+=(turns[turns.length-1].text?' ':'')+l;
+    else turns.push({speaker:'',t:'',text:l,preamble:1});
+  });
+  const real=turns.filter(x=>x.text&&!(x.preamble&&turns.length>1));
+  real.forEach((x,i)=>{ x.i=i; x.norm=txNorm(x.text); });
+  const speakers={}; real.forEach(x=>{ if(x.speaker) speakers[x.speaker]=(speakers[x.speaker]||0)+1; });
+  return {turns:real,speakers};
+}
+/* for comparing a quote with the transcript: letters and digits only */
+function txNorm(s){ return String(s||'').toLowerCase().replace(/[’‘`]/g,"'").replace(/[^a-z0-9]+/g,' ').trim(); }
+/* Which speaker is the adviser: the signed-in name, else the name on the Fact
+   Find, else whoever asks the most questions. */
+function txAdviser(tx,c){
+  const names=Object.keys(tx.speakers); if(!names.length) return '';
+  const want=[(typeof AUTH_USER!=='undefined'&&AUTH_USER&&AUTH_USER.name)||'',((c.data.meta||{}).adviser)||''].filter(Boolean);
+  for(const w of want){
+    const hit=names.find(n=>txNorm(n)===txNorm(w))
+      ||names.find(n=>nameScore(n,w)>=0.5)
+      ||names.find(n=>txNorm(n).split(' ')[0]===txNorm(w).split(' ')[0]);
+    if(hit) return hit;
+  }
+  const q={}; tx.turns.forEach(x=>{ q[x.speaker]=(q[x.speaker]||0)+(x.text.match(/\?/g)||[]).length; });
+  return names.sort((a,b)=>(q[b]||0)-(q[a]||0))[0];
+}
+/* Parts small enough for the assistant, overlapping by two turns so an answer
+   is never split from the question that prompted it. */
+function txChunks(turns,max){
+  max=max||11000;
+  const line=x=>(x.speaker||'Speaker')+(x.t?' ['+x.t+']':'')+': '+x.text;
+  const out=[]; let cur=[], size=0;
+  turns.forEach(x=>{
+    let l=line(x);
+    if(l.length>max) l=l.slice(0,max);
+    if(size+l.length+1>max&&cur.length){
+      out.push(cur);
+      cur=cur.slice(-2); size=cur.reduce((a,y)=>a+y.l.length+1,0);
+    }
+    cur.push({i:x.i,l}); size+=l.length+1;
+  });
+  if(cur.length) out.push(cur);
+  return out.map(p=>({from:p[0].i,to:p[p.length-1].i,text:p.map(y=>y.l).join('\n')}));
+}
+
+/* ------------------------------ checking it ----------------------------- */
+/* Where in the transcript a quote was said. Exact first; failing that, the
+   longest run of its words that appears — transcripts and assistants both
+   drop the odd "um". Returns the turn, or null if it was never said. */
+function txFindQuote(tx,quote){
+  /* "said this … and later said that" is two quotes, and both must be real.
+     The answer is dated to the later one, since that is the correction. */
+  const bits=String(quote||'').split(/\s*(?:\.{3,}|…)\s*/).filter(x=>txNorm(x).length>=4);
+  if(bits.length>1){
+    let last=null, exact=1;
+    for(const b of bits){ const f=txFindQuote(tx,b); if(!f) return null; last=f; if(!f.exact) exact=0; }
+    return {turn:last.turn,exact};
+  }
+  const q=txNorm(quote); if(q.length<4) return null;
+  /* A word or two proves nothing on its own — "Peter" appears everywhere — so
+     a very short quote only counts when it is somebody's whole answer
+     ("Euros."), which is how a one-word answer actually looks. */
+  if(q.length<6){ const whole=tx.turns.find(x=>x.norm===q); return whole?{turn:whole,exact:1}:null; }
+  let hit=tx.turns.find(x=>x.norm.indexOf(q)>=0);
+  if(hit) return {turn:hit,exact:1};
+  /* across two neighbouring turns */
+  for(let i=0;i<tx.turns.length-1;i++){
+    if((tx.turns[i].norm+' '+tx.turns[i+1].norm).indexOf(q)>=0) return {turn:tx.turns[i+1],exact:1};
+  }
+  const w=q.split(' ');
+  for(let n=Math.min(w.length-1,14);n>=6;n--){
+    for(let s=0;s+n<=w.length;s++){
+      const part=w.slice(s,s+n).join(' ');
+      hit=tx.turns.find(x=>x.norm.indexOf(part)>=0);
+      if(hit) return {turn:hit,exact:0};
+    }
+  }
+  return null;
+}
+/* "£350,000", "350k", "1.2m", "350 thousand" → 350000 */
+function txNumber(v){
+  if(typeof v==='number') return isFinite(v)?v:null;
+  let s=String(v==null?'':v).toLowerCase().replace(/[£$€,]/g,'').trim();
+  const m=/(-?\d+(?:\.\d+)?)\s*(k|thousand|grand|m|mill|million|bn|billion)?\b/.exec(s);
+  if(!m) return null;
+  let n=parseFloat(m[1]); const u=m[2]||'';
+  if(u==='k'||u==='thousand'||u==='grand') n*=1e3;
+  else if(u==='m'||u==='mill'||u==='million') n*=1e6;
+  else if(u==='bn'||u==='billion') n*=1e9;
+  return isFinite(n)?n:null;
+}
+/* every number said in a piece of text */
+function txNumbersIn(text){
+  const out=[]; const re=/(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|grand|m|mill|million)?\b/gi; let m;
+  const s=String(text||'');
+  while((m=re.exec(s))){ const n=txNumber(m[1].replace(/,/g,'')+(m[2]?' '+m[2]:'')); if(n!=null) out.push(n); }
+  return out;
+}
+function txNumIn(quote,value){
+  const v=Number(value); if(!isFinite(v)) return false;
+  return txNumbersIn(quote).some(n=>Math.abs(n-v)<=Math.max(0.5,Math.abs(v)*0.005));
+}
+const TX_ALIAS={uk:'United Kingdom',england:'United Kingdom',scotland:'United Kingdom',wales:'United Kingdom',
+  britain:'United Kingdom','great britain':'United Kingdom','the uk':'United Kingdom',british:'British',
+  usa:'United States',us:'United States',america:'United States','united states of america':'United States',
+  uae:'United Arab Emirates',dubai:'United Arab Emirates',
+  yes:'Yes',y:'Yes',true:'Yes',no:'No',n:'No',false:'No',
+  pounds:'GBP',sterling:'GBP','£':'GBP',euros:'EUR',euro:'EUR','€':'EUR',dollars:'USD','$':'USD'};
+/* the option in a list that a spoken answer means, or '' if none does */
+function txPick(list,v){
+  const raw=String(v==null?'':v).trim(); if(!raw) return '';
+  const n=txNorm(raw)||raw.toLowerCase();
+  const by=o=>txNorm(o);
+  let hit=list.find(o=>by(o)===n); if(hit) return hit;
+  const al=TX_ALIAS[n]||TX_ALIAS[raw.toLowerCase()];
+  if(al){ hit=list.find(o=>by(o)===by(al)); if(hit) return hit; }
+  hit=list.find(o=>by(o).indexOf(n)===0||n.indexOf(by(o))===0); if(hit) return hit;
+  hit=list.find(o=>n.length>=4&&(by(o).indexOf(n)>=0||n.indexOf(by(o))>=0)); if(hit) return hit;
+  return '';
+}
+/* Was this currency actually spoken? The assistant likes to assume one. */
+const TX_CCY_WORDS={GBP:['pound','sterling','gbp','quid'],EUR:['euro','eur'],USD:['dollar','usd'],
+  CHF:['franc','chf'],AUD:['australian dollar','aud'],CAD:['canadian dollar','cad'],AED:['dirham','aed'],
+  ZAR:['rand','zar'],SEK:['krona','sek'],NOK:['krone','nok'],SGD:['singapore dollar','sgd']};
+function txCcySaid(text,code){
+  const raw=String(text||''), t=' '+txNorm(raw)+' ';
+  if(code==='GBP'&&raw.indexOf('£')>=0) return true;
+  if(code==='EUR'&&raw.indexOf('€')>=0) return true;
+  if(code==='USD'&&raw.indexOf('$')>=0) return true;
+  return (TX_CCY_WORDS[code]||[]).some(w=>t.indexOf(' '+w)>=0);
+}
+function txDate(v){
+  const s=String(v==null?'':v).trim();
+  let m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if(m) return (+m[2]>=1&&+m[2]<=12&&+m[3]>=1&&+m[3]<=31)?s:'';
+  m=/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/.exec(s);
+  if(m&&+m[2]<=12&&+m[1]<=31) return m[3]+'-'+String(m[2]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0');
+  return '';
+}
+/* Make an answer fit its field. Returns {value, unlisted} — `unlisted` means
+   a choice was given that is not one of the options, so the adviser picks. */
+function txCoerce(fd,v){
+  if(v==null||v==='') return {value:''};
+  if(fd.type==='number'){ const n=txNumber(v); return {value:n==null?'':n}; }
+  if(fd.type==='date') return {value:txDate(v)};
+  if(fd.type==='select'){
+    const list=Array.isArray(fd.list)?fd.list:listFor(fd.list);
+    const hit=txPick(list,v);
+    return hit?{value:hit}:{value:'',unlisted:String(v).slice(0,60)};
+  }
+  return {value:String(v).replace(/\s+/g,' ').trim().slice(0,fd.type==='textarea'?1200:160)};
+}
+/* whatever came back, as a list of objects — tolerant of fences and chatter */
+function txJson(text){
+  let t=String(text||'').replace(/```(?:json)?/gi,'').trim();
+  const a=t.indexOf('['), b=t.lastIndexOf(']');
+  if(a>=0&&b>a){ try{ const j=JSON.parse(t.slice(a,b+1)); if(Array.isArray(j)) return j; }catch(e){} }
+  /* salvage: each object on its own, so one bad item does not lose the rest */
+  const out=[]; let depth=0, start=-1, inStr=false, esc2=false;
+  for(let i=0;i<t.length;i++){
+    const ch=t[i];
+    if(inStr){ if(esc2) esc2=false; else if(ch==='\\') esc2=true; else if(ch==='"') inStr=false; continue; }
+    if(ch==='"'){ inStr=true; continue; }
+    if(ch==='{'){ if(depth===0) start=i; depth++; }
+    else if(ch==='}'){ depth--; if(depth===0&&start>=0){ try{ out.push(JSON.parse(t.slice(start,i+1))); }catch(e){} start=-1; } }
+  }
+  return out;
+}
+function txWho(w,c){
+  const s=String(w==null?'':w).toLowerCase().trim();
+  if(s==='2'||s==='client 2'||s==='a2'||s==='partner'||s==='spouse') return 'a2';
+  if(s==='joint'||s==='both') return 'joint';
+  return 'a1';
+}
+function txCurrent(c,sec,id,who){
+  const S0=txSection(sec); if(!S0) return '';
+  const d=c.data[sec]||{};
+  const v=S0.per==='applicant'?((d[who==='a2'?'a2':'a1']||{})[id]):d[id];
+  return v==null?'':v;
+}
+
+/* Turn what the assistant returned for one part into checked facts. */
+function txCheck(c,tx,adviser,items,into){
+  (items||[]).forEach(it=>{
+    if(!it||typeof it!=='object') return;
+    const k=String(it.k||it.key||''), quote=String(it.q||it.quote||'');
+    into.stats.returned++;
+    const found=txFindQuote(tx,quote);
+    if(!found){ into.stats.noEvidence++; return; }            /* never said: gone */
+    const who=txWho(it.who,c);
+    const said=found.turn.speaker;
+    const byAdviser=!!adviser&&said===adviser;
+    const L1=TX_LISTS.find(x=>x[0]===k);
+    if(L1){
+      const v=(it.v&&typeof it.v==='object')?it.v:{};
+      const fields={}, notes=[]; let check=false;
+      L1[2].forEach(id=>{
+        const fd=txFieldDef(k,id); if(!fd||v[id]==null||v[id]==='') return;
+        const r=txCoerce(fd,v[id]);
+        if(r.unlisted){ notes.push(fd.label+': “'+r.unlisted+'”'); return; }
+        if(r.value==='') return;
+        /* a currency nobody mentioned is a guess: leave it for the adviser */
+        if(fd.list==='currency'&&!txCcySaid(quote+' '+found.turn.text,r.value)) return;
+        if(fd.type==='number'&&Number(r.value)>=100&&!txNumIn(quote,r.value)&&!txNumIn(found.turn.text,r.value)) check=true;
+        fields[id]=r.value;
+      });
+      const name=String(fields[L1[1]]||'').trim();
+      if(!name||Object.keys(fields).length<1){ into.stats.empty++; return; }
+      /* the same thing mentioned again adds to what we know of it */
+      const same=into.items.find(x=>x.list===k&&(txNorm(x.fields[L1[1]])===txNorm(name)||nameScore(String(x.fields[L1[1]]),name)>=0.6)
+        &&(k!=='statePensions'||x.who===who));
+      if(same){
+        Object.keys(fields).forEach(id=>{ if(same.fields[id]==null||same.fields[id]==='') same.fields[id]=fields[id]; });
+        same.quotes.push({q:quote,t:found.turn.t,speaker:said});
+        same.check=same.check||check; same.byAdviser=same.byAdviser&&byAdviser;
+        return;
+      }
+      into.items.push({list:k,key:L1[1],who,fields,notes,check,byAdviser,
+        quotes:[{q:quote,t:found.turn.t,speaker:said}]});
+      return;
+    }
+    const dot=k.indexOf('.'); if(dot<0){ into.stats.unknown++; return; }
+    const sec=k.slice(0,dot), id=k.slice(dot+1);
+    if(!TX_SINGLE.some(x=>x[0]===sec&&x[1]===id)){ into.stats.unknown++; return; }
+    const fd=txFieldDef(sec,id); if(!fd){ into.stats.unknown++; return; }
+    const r=txCoerce(fd,it.v);
+    if(r.value===''&&!r.unlisted){ into.stats.empty++; return; }
+    if(fd.list==='currency'&&r.value&&!txCcySaid(quote+' '+found.turn.text,r.value)){ into.stats.noEvidence++; return; }
+    const per=txSection(sec).per==='applicant';
+    /* "we live in Portugal", "we both made a will": said of the two of them,
+       so it answers the question for both — where there are two */
+    const targets=!per?[null]:(who==='joint'&&hasApplicant2(c))?['a1','a2']:[who==='a2'?'a2':'a1'];
+    const check=fd.type==='number'&&Number(r.value)>=100&&!txNumIn(quote,r.value)&&!txNumIn(found.turn.text,r.value);
+    targets.forEach(w=>{
+      const fact={sec,id,who:w,value:r.value,unlisted:r.unlisted||'',check,byAdviser,inexact:!found.exact,
+        quote,t:found.turn.t,speaker:said};
+      /* a later answer to the same question is a correction: it replaces the earlier one */
+      const at=into.facts.findIndex(x=>x.sec===sec&&x.id===id&&x.who===w);
+      if(at>=0){
+        if(into.facts[at].fromLabel){ into.facts[at]=fact; return; }
+        if(fd.type==='textarea'&&String(into.facts[at].value).indexOf(String(r.value))<0&&!byAdviser)
+          fact.value=(String(into.facts[at].value)+' '+String(r.value)).slice(0,1200);
+        if(byAdviser&&!into.facts[at].byAdviser) return;        /* the client's own words win */
+        into.facts[at]=fact;
+      } else into.facts.push(fact);
+    });
+  });
+}
+/* Decide what is ticked to begin with, and what each answer would replace. */
+function txFinish(c,into){
+  into.facts.forEach(f=>{
+    f.current=txCurrent(c,f.sec,f.id,f.who);
+    const same=String(f.current)===String(f.value);
+    f.same=f.current!==''&&same;
+    f.replaces=f.current!==''&&!same;
+    f.use=!f.same&&!f.replaces&&!f.check&&!f.byAdviser&&!f.unlisted&&f.value!=='';
+  });
+  into.facts=into.facts.filter(f=>!f.same);
+  into.items.forEach(it=>{
+    const rows=c.data[it.list]||[];
+    const name=String(it.fields[it.key]||'');
+    const hit=rows.find(r=>txNorm(r[it.key])===txNorm(name)||nameScore(String(r[it.key]||''),name)>=0.6);
+    it.target=hit?hit._id:'new';
+    it.use=!it.check&&!it.byAdviser;
+  });
+  /* in the order the Fact Find is laid out */
+  const order=SECTIONS.map(s=>s.id);
+  into.facts.sort((a,b)=>order.indexOf(a.sec)-order.indexOf(b.sec)||String(a.who).localeCompare(String(b.who)));
+  into.items.sort((a,b)=>order.indexOf(a.list)-order.indexOf(b.list));
+  return into;
+}
+/* Who is who, said to the assistant in a sentence. */
+function txPeople(c,tx,adviser){
+  const P=c.data.personal||{}, a=P.a1||{}, b=P.a2||{};
+  const others=Object.keys(tx.speakers).filter(n=>n!==adviser);
+  const n1=[a.firstName,a.surname].filter(Boolean).join(' ')||others[0]||'';
+  const n2=[b.firstName,b.surname].filter(Boolean).join(' ')||(others[1]||'');
+  return 'Client 1 (who "1") is '+(n1||'the main client in the meeting')+'. '
+    +(n2?'Client 2 (who "2") is '+n2+'. ':'Client 2 (who "2") is their husband, wife or partner, if one is mentioned. ')
+    +'Use "joint" for anything they own or decide together.';
+}
+/* The whole read. `hooks.progress(part,parts)` and `hooks.stop()` are optional. */
+async function txRun(c,lines,hooks){
+  hooks=hooks||{};
+  const tx=txParse(lines);
+  if(!tx.turns.length) throw new Error('There is no text in that file.');
+  const adviser=txAdviser(tx,c);
+  const parts=txChunks(tx.turns,11000);
+  const into={facts:[],items:[],stats:{turns:tx.turns.length,parts:parts.length,read:0,returned:0,noEvidence:0,unknown:0,empty:0,failed:0},
+    adviser,speakers:Object.keys(tx.speakers)};
+  /* the speaker's own name is evidence of who the client is */
+  const others=into.speakers.filter(n=>n!==adviser);
+  const P1=(c.data.personal||{}).a1||{};
+  if(others[0]&&!P1.firstName&&!P1.surname){
+    const w=others[0].split(/\s+/);
+    if(w.length>=2){
+      into.facts.push({sec:'personal',id:'firstName',who:'a1',value:w[0],quote:'named on the transcript as '+others[0],t:'',speaker:others[0],fromLabel:1});
+      into.facts.push({sec:'personal',id:'surname',who:'a1',value:w.slice(1).join(' '),quote:'named on the transcript as '+others[0],t:'',speaker:others[0],fromLabel:1});
+    }
+  }
+  const want=txWant(), lists=txWantLists(), people=txPeople(c,tx,adviser);
+  for(let i=0;i<parts.length;i++){
+    if(hooks.stop&&hooks.stop()) break;
+    if(hooks.progress) hooks.progress(i+1,parts.length,into);
+    try{
+      const r=await api('POST','/api/ai',{kind:'transcriptExtract',facts:parts[i].text,want,lists,
+        adviser:adviser||'the adviser',people,part:i+1,parts:parts.length});
+      txCheck(c,tx,adviser,txJson(r.text),into);
+      into.stats.read++;
+    }catch(e){
+      into.stats.failed++; into.lastError=e.message;
+      if(e.auth||/not switched on/i.test(e.message||'')) throw e;
+    }
+  }
+  return txFinish(c,into);
+}
+
+/* --------------------------------- screens ------------------------------- */
+function txOpenModal(c){
+  let h=mHead('Fill the Fact Find from a meeting','Drop in the transcript of your meeting with '+esc(clientName(c)||'this client')
+    +'. I read what was said, show you every answer with the words it came from, and you choose what goes in.');
+  h+='<div class="m-b">'
+    +'<div class="field"><label class="lbl">The transcript</label>'
+    +'<input type="file" class="inp" id="txFile" accept=".docx,.txt,.vtt,.md"></div>'
+    +'<div class="field"><label class="lbl">…or paste it here</label>'
+    +'<textarea class="inp" id="txPaste" rows="5" placeholder="Paste the transcript text"></textarea></div>'
+    +'<div class="note mut"><span class="ic">'+ic('info',15)+'</span><div>A Teams, Zoom or Meet transcript saved as Word '
+    +'or text works best, because it says who is speaking. An hour’s meeting takes a minute or two to read.</div></div>'
+    +'<div class="note mut mt"><span class="ic">'+ic('shield',15)+'</span><div>The transcript is read by the assistant on '
+    +'your own Cloudflare account and nowhere else, and it is <b>not saved</b> to the client record — only the answers '
+    +'you accept are. Nothing is changed until you press Apply.</div></div>'
+    +'</div><div class="m-f"><button class="btn" data-a="close">Cancel</button>'
+    +'<button class="btn pri" data-a="txGo">'+ic('search',14)+' Read it</button></div>';
+  openModal(h);
+}
+function txProgressModal(part,parts,into){
+  let h=mHead('Reading the meeting','Part '+part+' of '+parts+'. This takes a minute or two — leave this open.');
+  h+='<div class="m-b"><div style="height:8px;border-radius:6px;background:var(--line-2);overflow:hidden">'
+    +'<div style="height:8px;width:'+Math.round((part-1)/parts*100)+'%;background:var(--blue)"></div></div>'
+    +'<div class="tiny muted2 mt-s">'+(into?(into.facts.length+into.items.length)+' answers found so far':'')+'</div></div>'
+    +'<div class="m-f"><button class="btn" data-a="txStop">Stop and show what was found</button></div>';
+  openModal(h);
+}
+function txWhoName(c,w){
+  if(!w) return '';
+  const p=((c.data.personal||{})[w]||{});
+  return p.firstName||(w==='a2'?'Applicant 2':'Applicant 1');
+}
+function txInput(fd,val,attr){
+  if(fd.type==='select'){
+    const list=Array.isArray(fd.list)?fd.list:listFor(fd.list);
+    return '<select class="sel" '+attr+' style="padding:6px 26px 6px 8px;font-size:12.5px">'+optsHTML(list,val,true)+'</select>';
+  }
+  if(fd.type==='textarea') return '<textarea class="inp" rows="2" '+attr+' style="font-size:12.5px">'+esc(val)+'</textarea>';
+  return '<input class="inp" '+attr+' value="'+esc(val)+'" style="padding:6px 8px;font-size:12.5px"'
+    +(fd.type==='number'?' inputmode="decimal"':'')+(fd.type==='date'?' type="date"':'')+'>';
+}
+function txBadges(x){
+  return (x.replaces?'<span class="bdg warn">replaces “'+esc(String(x.current).slice(0,40))+'”</span> ':'')
+    +(x.check?'<span class="bdg warn">check the figure</span> ':'')
+    +(x.byAdviser?'<span class="bdg warn">said by the adviser</span> ':'')
+    +(x.unlisted?'<span class="bdg warn">said “'+esc(x.unlisted)+'” — choose</span> ':'')
+    +(x.inexact?'<span class="bdg mut">quote is approximate</span> ':'');
+}
+function txQuote(q){
+  return '<div class="tiny muted2" style="margin-top:3px">“'+esc(String(q.q||q.quote||'').slice(0,240))+'”'
+    +((q.speaker||q.t)?' <span class="mu">— '+esc(q.speaker||'')+(q.t?' at '+esc(q.t):'')+'</span>':'')+'</div>';
+}
+function txResultModal(){
+  const c=getClient(S.clientId), f=S.flow; if(!c||!f||f.mode!=='tx') return;
+  const r=f.res, st=r.stats;
+  const n=r.facts.length+r.items.length;
+  let h=mHead('What the meeting said',
+    'Read '+st.turns+' turns in '+st.parts+' part'+(st.parts===1?'':'s')+'. Tick what should go into the Fact Find, '
+    +'change anything that is not quite right, then apply.');
+  h+='<div class="m-b" style="max-height:62vh;overflow:auto">';
+  if(st.failed) h+='<div class="note warn mb-s"><span class="ic">'+ic('alert',15)+'</span><div>'+st.failed+' of '+st.parts
+    +' parts could not be read'+(r.lastError?' ('+esc(r.lastError)+')':'')+'. What follows is from the rest.</div></div>';
+  if(!n){
+    h+='<div class="empty"><h4>Nothing I could stand behind</h4><p>The assistant returned '+st.returned+' answer'
+      +(st.returned===1?'':'s')+', but none could be matched to words actually said in the transcript.</p></div>';
+  }
+  h+='<div class="row wrapf tiny muted2 mb-s" style="gap:12px">'
+    +'<span><b>'+n+'</b> found</span>'
+    +(st.noEvidence?'<span><b>'+st.noEvidence+'</b> thrown away — not said in the transcript</span>':'')
+    +(r.adviser?'<span>adviser: '+esc(r.adviser)+'</span>':'')
+    +'</div>';
+  /* single answers, section by section */
+  let lastSec='';
+  r.facts.forEach((x,i)=>{
+    const S0=txSection(x.sec), fd=txFieldDef(x.sec,x.id);
+    if(x.sec!==lastSec){ if(lastSec) h+='</div>'; lastSec=x.sec;
+      h+='<div class="label mb-s" style="margin-top:12px">'+esc(S0.name)+'</div><div class="stack" style="gap:6px">'; }
+    h+='<div class="card"><div class="card-b" style="padding:9px 11px"><div class="row" style="gap:10px;align-items:flex-start">'
+      +'<input type="checkbox" data-txu="'+i+'"'+(x.use?' checked':'')+' style="margin-top:6px">'
+      +'<div style="flex:1;min-width:0"><div class="row wrapf" style="gap:8px;align-items:center">'
+      +'<span class="b7 small">'+esc(fd.label)+'</span>'
+      +(x.who?'<span class="bdg mut">'+esc(txWhoName(c,x.who))+'</span>':'')+txBadges(x)+'</div>'
+      +'<div style="margin-top:5px">'+txInput(fd,x.value,'data-txv="'+i+'"')+'</div>'
+      +txQuote(x)+'</div></div></div></div>';
+  });
+  if(lastSec) h+='</div>';
+  /* things there can be several of */
+  let lastList='';
+  r.items.forEach((it,i)=>{
+    const S0=txSection(it.list);
+    if(it.list!==lastList){ if(lastList) h+='</div>'; lastList=it.list;
+      h+='<div class="label mb-s" style="margin-top:12px">'+esc(S0.name)+'</div><div class="stack" style="gap:6px">'; }
+    const rows=c.data[it.list]||[];
+    const ids=TX_LISTS.find(x=>x[0]===it.list)[2].filter(id=>it.fields[id]!=null&&it.fields[id]!=='');
+    h+='<div class="card"><div class="card-b" style="padding:9px 11px"><div class="row" style="gap:10px;align-items:flex-start">'
+      +'<input type="checkbox" data-txi="'+i+'"'+(it.use?' checked':'')+' style="margin-top:6px">'
+      +'<div style="flex:1;min-width:0"><div class="row wrapf" style="gap:8px;align-items:center">'
+      +'<span class="b7 small">'+esc(String(it.fields[it.key]))+'</span>'
+      +(it.list!=='dependants'?'<span class="bdg mut">'+(it.who==='joint'?'Joint':esc(txWhoName(c,it.who)))+'</span>':'')
+      +txBadges(it)
+      +'<select class="sel sp" data-txt="'+i+'" style="padding:4px 24px 4px 8px;font-size:12px">'
+      +'<option value="new"'+(it.target==='new'?' selected':'')+'>Add as new</option>'
+      +rows.map(rw=>'<option value="'+esc(rw._id)+'"'+(it.target===rw._id?' selected':'')+'>Update: '
+        +esc(String(rw[it.key]||'(unnamed)').slice(0,40))+'</option>').join('')
+      +'</select></div>'
+      +'<div class="grid g3" style="gap:8px;margin-top:6px">'
+      +ids.map(id=>{ const fd=txFieldDef(it.list,id);
+        return '<div><div class="tiny muted2">'+esc(fd.label)+'</div>'+txInput(fd,it.fields[id],'data-txf="'+i+'|'+id+'"')+'</div>'; }).join('')
+      +'</div>'
+      +(it.notes.length?'<div class="tiny muted2" style="margin-top:4px">Also said: '+esc(it.notes.join(' · '))+'</div>':'')
+      +it.quotes.slice(0,3).map(txQuote).join('')+'</div></div></div></div>';
+  });
+  if(lastList) h+='</div>';
+  h+='</div><div class="m-f"><span class="tiny muted2 sp">Unticked answers are left out. The Fact Find is not changed until you apply.</span>'
+    +'<button class="btn" data-a="close">Cancel</button>'
+    +(n?'<button class="btn pri" data-a="txApply">'+ic('check',14)+' Apply the ticked answers</button>':'')+'</div>';
+  openModal(h,true);
+}
+/* what is on screen now, back into the flow — so an edit survives a redraw */
+function txSyncFromDom(){
+  const f=S.flow; if(!f||f.mode!=='tx') return;
+  document.querySelectorAll('#modal [data-txu]').forEach(el=>{ const x=f.res.facts[+el.dataset.txu]; if(x) x.use=el.checked; });
+  document.querySelectorAll('#modal [data-txv]').forEach(el=>{ const x=f.res.facts[+el.dataset.txv]; if(x) x.value=el.value; });
+  document.querySelectorAll('#modal [data-txi]').forEach(el=>{ const x=f.res.items[+el.dataset.txi]; if(x) x.use=el.checked; });
+  document.querySelectorAll('#modal [data-txt]').forEach(el=>{ const x=f.res.items[+el.dataset.txt]; if(x) x.target=el.value; });
+  document.querySelectorAll('#modal [data-txf]').forEach(el=>{ const b=el.dataset.txf.split('|'); const x=f.res.items[+b[0]]; if(x) x.fields[b[1]]=el.value; });
+}
+function txOwner(list,who){
+  const fd=txFieldDef(list,'owner'); if(!fd) return null;
+  if(who==='a2') return 'Applicant 2';
+  if(who==='joint') return fd.list==='ownerSingle'?'Applicant 1':'Joint';
+  return 'Applicant 1';
+}
+/* Write the ticked answers into the client. Returns how many went in. */
+function txApply(c,res){
+  let n=0;
+  res.facts.forEach(x=>{
+    if(!x.use) return;
+    const fd=txFieldDef(x.sec,x.id); if(!fd) return;
+    const r=txCoerce(fd,x.value); if(r.value==='') return;
+    const S0=txSection(x.sec);
+    c.data[x.sec]=c.data[x.sec]||{};
+    if(S0.per==='applicant'){ const w=x.who==='a2'?'a2':'a1'; c.data[x.sec][w]=c.data[x.sec][w]||{}; c.data[x.sec][w][x.id]=r.value; }
+    else c.data[x.sec][x.id]=r.value;
+    n++;
+  });
+  res.items.forEach(it=>{
+    if(!it.use) return;
+    c.data[it.list]=c.data[it.list]||[];
+    let row=it.target!=='new'?c.data[it.list].find(r=>r._id===it.target):null;
+    const fresh=!row;
+    if(fresh){ row={_id:uid('r')}; const o=txOwner(it.list,it.who); if(o) row.owner=o; }
+    let wrote=0;
+    Object.keys(it.fields).forEach(id=>{
+      const fd=txFieldDef(it.list,id); if(!fd) return;
+      const r=txCoerce(fd,it.fields[id]); if(r.value==='') return;
+      row[id]=r.value; wrote++;
+    });
+    if(!wrote) return;
+    if(fresh) c.data[it.list].push(row);
+    n++;
+  });
+  if(n){
+    c.data.meta=c.data.meta||{};
+    const line='Filled from the meeting transcript on '+fdate(new Date())+' ('+n+' answer'+(n===1?'':'s')+').';
+    c.data.meta.notes=(c.data.meta.notes?String(c.data.meta.notes).trim()+'\n':'')+line;
+    touch(c);
+  }
+  return n;
+}
+
+/* -------------------------------- wiring -------------------------------- */
+let TX_STOP=false;
+Object.assign(ACT,{
+  txOpen(){ const c=getClient(S.clientId); if(!c) return; txOpenModal(c); },
+  txStop(){ TX_STOP=true; toast('Stopping','Finishing the part being read, then showing what was found.'); },
+  async txGo(){
+    const c=getClient(S.clientId); if(!c) return;
+    const file=(($('#txFile')||{}).files||[])[0];
+    const pasted=(($('#txPaste')||{}).value||'').trim();
+    if(!file&&!pasted){ toast('Add the transcript','Choose the file, or paste the text.','warn'); return; }
+    let lines;
+    try{
+      if(file){
+        if(/\.vtt$/i.test(file.name)) lines=(await file.text()).split(/\r?\n/);
+        else lines=(await readDocument(file)).lines;
+      } else lines=pasted.split(/\r?\n/);
+    }catch(e){ toast('Could not read that file',e.message,'warn',8000); return; }
+    if(!lines||!lines.join('').trim()){ toast('That file is empty','There is no text in it to read.','warn'); return; }
+    TX_STOP=false;
+    const clientId=S.clientId;
+    txProgressModal(1,1,null);
+    try{
+      const res=await txRun(c,lines,{stop:()=>TX_STOP,
+        progress:(i,n,into)=>{ if(S.clientId===clientId) txProgressModal(i,n,into); }});
+      if(S.clientId!==clientId) return;                 /* they moved on; do not ambush them */
+      S.flow={mode:'tx',res};
+      txResultModal();
+    }catch(e){
+      dismissModal();
+      toast('Could not read the meeting',e.message||'The assistant could not be reached.','risk',9000);
+    }
+  },
+  txApply(){
+    const c=getClient(S.clientId), f=S.flow; if(!c||!f||f.mode!=='tx') return;
+    txSyncFromDom();
+    const n=txApply(c,f.res);
+    dismissModal(); render();
+    toast(n?'Fact Find filled':'Nothing applied',
+      n?n+' answer'+(n===1?'':'s')+' from the meeting went in. Read them through — they are the client’s words, not a check of the facts.'
+       :'Nothing was ticked.',n?null:'warn',8000);
+  }
+});
+/* the button on the client page */
+const _screenClientTX=screenClient;
+screenClient=function(){
+  const h=_screenClientTX();
+  return h.replace('<button class="btn sm" data-a="filesOpen"',
+    '<button class="btn sm blue" data-a="txOpen">'+ic('file',14)+' Meeting transcript</button>'
+    +'<button class="btn sm" data-a="filesOpen"');
+};

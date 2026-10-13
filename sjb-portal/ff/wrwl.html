@@ -1,0 +1,293 @@
+/* ===========================================================================
+   RWL REVIEW — the first tool in the Admin portal.
+
+   Reason Why Letters go to Blacktower and come back with a list of points.
+   This tool checks a letter against the manual and the checklist before it
+   goes (with a score, and a gate: nothing is marked as sent until every
+   "must" finding is cleared or overridden with a reason by a second pair of
+   eyes), and turns the compliance email into tracked changes in the Word
+   file plus a draft reply when it comes back. Every step is logged and the
+   log exports as a CSV.
+
+   Everything runs on the server (see rwl_server.js); this file is only the
+   screen. It registers itself with the Admin portal (wadm) and adds its
+   actions to ACT like every other part.
+   ========================================================================= */
+const RWL={view:'list',cases:[],cur:null,file:null,email:'',busy:'',info:null,loaded:false,templates:[],btRef:''};
+const RWL_STATUS={uploaded:['Uploaded','info'],'checked-ready':['Checked · ready','ok'],'checked-issues':['Checked · issues found','warn'],
+  approved:['Approved','ok'],submitted:['Sent to Blacktower','info'],'edits-proposed':['Returned · changes proposed','or'],redlined:['Redlined','ok'],
+  resubmitted:['Resubmitted','info'],closed:['Closed','mut']};
+const RWL_STEPS=[['uploaded','Uploaded'],['checked','Checked'],['approved','Approved'],['submitted','Sent'],['returned','Returned'],['redlined','Redlined'],['resubmitted','Resubmitted'],['closed','Closed']];
+const RWL_OPS={replace:'Replace paragraph',insert_after:'Add after paragraph',delete:'Delete paragraph'};
+
+async function rwlApi(method,path,body,form){
+  const res=await fetch(path,{method,credentials:'same-origin',
+    headers:form?{}:(body?{'content-type':'application/json'}:{}),
+    body:form?form:(body?JSON.stringify(body):undefined)});
+  if(res.status===401){ AUTH_USER=null; showLogin(); throw new Error('Please sign in.'); }
+  const txt=await res.text(); let data={};
+  try{ data=txt?JSON.parse(txt):{}; }catch(e){ data={error:txt}; }
+  if(!res.ok) throw new Error(data.error||('Server error '+res.status));
+  return data;
+}
+function rwlWhen(s){ const d=D(s); if(!d) return '—'; return d.getDate()+' '+MONS[d.getMonth()]+' '+d2(d.getHours())+':'+d2(d.getMinutes()); }
+function rwlBadge(s){ const x=RWL_STATUS[s]||[s,'mut']; return '<span class="bdg '+x[1]+'"><span class="dot"></span>'+esc(x[0])+'</span>'; }
+function rwlScore(sc){ if(sc==null) return '<span class="muted2">—</span>'; const k=sc>=80?'ok':sc>=50?'warn':'risk'; return '<span class="bdg '+k+'" title="100 minus 15 per must finding and 5 per should finding">'+sc+'</span>'; }
+function rwlBusy(){ return RWL.busy?'<div class="row" style="gap:8px;margin-top:12px"><span class="spin"></span><span class="small muted">'+esc(RWL.busy)+'</span></div>':''; }
+function rwlSetInfo(kind,text){ RWL.info=text?{kind,text}:null; }
+function rwlInfo(){ return RWL.info?'<div class="note '+esc(RWL.info.kind)+'" style="margin-top:12px"><span class="ic">'+ic(RWL.info.kind==='risk'?'alert':'info',15)+'</span><div>'+esc(RWL.info.text)+'</div></div>':''; }
+async function rwlLoad(){
+  RWL.loaded=true;
+  try{ const r=await rwlApi('GET','/api/rwl/cases'); RWL.cases=r.cases||[]; }
+  catch(e){ RWL.cases=[]; rwlSetInfo('risk',e.message); }
+}
+async function rwlOpenCase(id){
+  const c=await rwlApi('GET','/api/rwl/cases/'+encodeURIComponent(id));
+  RWL.cur=c; RWL.email=c.email||''; RWL.view='case'; rwlSetInfo();
+}
+/* where a case sits on the journey, for the strip at the top of the case */
+function rwlStage(c){
+  const s=c.status;
+  if(s==='closed') return 7; if(s==='resubmitted') return 6; if(s==='redlined') return 5; if(s==='edits-proposed') return 4;
+  if(s==='submitted') return 3; if(s==='approved') return 2; if(s==='checked-ready'||s==='checked-issues') return 1; return 0;
+}
+
+/* ------------------------------- screens -------------------------------- */
+function rwlListHTML(){
+  let h='<div class="ph"><div><h1>RWL Review</h1>'
+    +'<div class="sub">Reason Why Letters, checked and scored before they go to Blacktower, and fixed when they come back.</div></div>'
+    +'<div class="sp row" style="gap:8px"><button class="btn" data-a="rwlRefresh">'+ic('swap',15)+' Refresh</button>'
+    +'<button class="btn pri" data-a="rwlNew">'+ic('plus',15)+' New review</button></div></div>'+rwlInfo();
+  if(!RWL.cases.length){
+    return h+'<div class="card"><div class="empty"><div class="ei">'+ic('file',22)+'</div>'
+      +'<h4>No letters yet</h4><p>Upload a Reason Why Letter as a Word file. Check it against the Blacktower manual before it goes, get it approved by a second pair of eyes, '
+      +'or paste the email Compliance sent back and get the changes made as tracked changes.</p>'
+      +'<div class="row" style="justify-content:center;margin-top:16px"><button class="btn pri" data-a="rwlNew">'+ic('plus',15)+' New review</button></div></div></div>';
+  }
+  h+='<div class="card"><div class="tw"><table class="t"><thead><tr><th>Reference</th><th>Adviser</th><th>Template</th><th>Status</th><th>Score</th><th>Updated</th><th>By</th><th style="width:40px"></th></tr></thead><tbody>';
+  RWL.cases.forEach(c=>{
+    h+='<tr class="clk" data-a="rwlOpen" data-v="'+esc(c.id)+'"><td class="b7">'+esc(c.ref)+'</td><td>'+esc(c.adviser||'—')+'</td><td class="tiny muted">'+esc(c.template||'—')+'</td>'
+      +'<td>'+rwlBadge(c.status)+(c.returned?' <span class="tiny muted">×'+c.returned+'</span>':'')+'</td><td>'+rwlScore(c.score)+'</td>'
+      +'<td class="tiny muted">'+esc(rwlWhen(c.updated))+'</td><td class="tiny muted">'+esc(c.createdBy||'')+'</td>'
+      +'<td class="muted2">'+ic('chev',15)+'</td></tr>';
+  });
+  h+='</tbody></table></div></div>'
+    +'<div class="hint" style="margin-top:10px">Letters stay here until the case is deleted. Close a case when Blacktower approve it; delete it once the adviser has the final file.</div>';
+  return h;
+}
+function rwlNewHTML(){
+  const f=RWL.file;
+  return '<div class="ph"><div><h1>New review</h1><div class="sub">Upload the Reason Why Letter as it was sent, or as it came back.</div></div>'
+    +'<div class="sp"><button class="btn" data-a="rwlHome">'+ic('chevL',15)+' All letters</button></div></div>'
+    +'<div class="card"><div class="card-h"><span class="av s or">1</span><h3>The letter</h3></div><div class="card-b">'
+    +'<div class="grid" style="grid-template-columns:1fr 1fr 1fr">'
+    +'<div class="field"><label class="lbl">Case reference <span class="req">*</span></label><input class="inp" id="rwlRef" placeholder="Initials or file number, not the full name" value="'+esc(RWL.ref||'')+'">'
+    +'<div class="hint">Use a reference rather than the client name. The letter itself carries the name.</div></div>'
+    +'<div class="field"><label class="lbl">Adviser</label><input class="inp" id="rwlAdviser" placeholder="e.g. Vickey" value="'+esc(RWL.adviser||'')+'"></div>'
+    +'<div class="field"><label class="lbl">Built from template</label><select class="sel" id="rwlTemplate"><option value="">— not recorded —</option>'
+    +RWL.templates.map(t=>'<option value="'+esc(t.id)+'"'+(RWL.templateId===t.id?' selected':'')+'>'+esc(t.name)+(t.status==='aligned'?'':' (not aligned)')+'</option>').join('')+'</select>'
+    +'<div class="hint">So Insights can show which templates still cause bounce-backs.</div></div></div>'
+    +'<div id="rwlDrop" class="empty" style="border:2px dashed var(--line);border-radius:12px;padding:26px;cursor:pointer'+(f?';border-color:var(--ok)':'')+'">'
+    +'<div class="ei">'+ic(f?'check':'up',22)+'</div>'
+    +(f?'<h4>'+esc(f.name)+'</h4><p>'+Math.round(f.size/1024)+' KB · click to choose a different file</p>'
+       :'<h4>Drop the Word file here</h4><p>or click to choose it (.docx only)</p>')
+    +'</div><input type="file" id="rwlFile" accept=".docx" style="display:none">'
+    +rwlInfo()+rwlBusy()
+    +'<div class="row" style="margin-top:16px;gap:8px"><button class="btn pri" data-a="rwlUpload"'+(f&&!RWL.busy?'':' disabled')+'>'+ic('up',15)+' Upload and continue</button>'
+    +'<button class="btn" data-a="rwlHome">Cancel</button></div></div></div>';
+}
+function rwlFindingsHTML(f,c){
+  if(!f) return '';
+  const ov=new Set(((c&&c.approval&&c.approval.overrides)||(c&&c.overrides)||[]).map(o=>o.k));
+  let h='<div class="note '+(f.ready_to_submit?'ok':'warn')+'" style="margin-top:14px"><span class="ic">'+ic(f.ready_to_submit?'check':'alert',15)+'</span>'
+    +'<div><b>'+(f.ready_to_submit?'Nothing that would stop it.':f.findings.filter(x=>x.severity==='must').length+' point'+(f.findings.filter(x=>x.severity==='must').length===1?'':'s')+' Compliance would raise.')+'</b> '+esc(f.summary)
+    +(f.ai!=null?' <span class="muted2">('+f.ai+' from the reviewer, '+f.code+' automatic)</span>':'')+'</div></div>';
+  if(f.findings.length){
+    h+='<div class="tw" style="margin-top:12px"><table class="t"><thead><tr><th style="width:110px">Rule</th><th style="width:60px">Para</th><th>Issue and evidence</th><th>What would satisfy it</th></tr></thead><tbody>';
+    f.findings.forEach((x,k)=>{ h+='<tr'+(ov.has(k)?' style="opacity:.6"':'')+'><td><span class="bdg '+(x.severity==='must'?'risk':'warn')+'">'+esc(x.rule)+' · '+esc(x.severity)+'</span>'+(ov.has(k)?'<div class="tiny muted" style="margin-top:4px">overridden</div>':'')+'</td>'
+      +'<td class="mono muted">'+(x.paragraph==null?'—':esc(x.paragraph))+'</td><td class="small" style="white-space:normal">'+esc(x.issue)
+      +(x.quote?'<div class="tiny" style="margin-top:4px;padding-left:8px;border-left:2px solid var(--line);color:var(--ink-2)"><em>“'+esc(x.quote)+'”</em></div>':'')
+      +(x.manual_ref?'<div class="tiny muted2" style="margin-top:3px">'+esc(x.manual_ref)+'</div>':'')+'</td>'
+      +'<td class="small" style="white-space:normal">'+esc(x.fix)+'</td></tr>'; });
+    h+='</tbody></table></div>';
+  }
+  return h;
+}
+function rwlGateHTML(c){
+  const f=c.findings; if(!f) return '';
+  const stage=rwlStage(c);
+  const open=f.findings.map((x,k)=>({x,k})).filter(z=>z.x.severity==='must'&&!((c.overrides||[]).some(o=>o.k===z.k)));
+  let h='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">3</span><div><h3>Approve and send</h3>'
+    +'<div class="sub">Nothing is marked as sent until every “must” finding is fixed or overridden with a reason, by someone other than the person who uploaded it.</div></div></div><div class="card-b">';
+  if(c.approval){
+    h+='<div class="note ok mb"><span class="ic">'+ic('check',15)+'</span><div><b>Approved</b> by '+esc(c.approval.by)+' · '+esc(rwlWhen(c.approval.at))+' · score '+c.approval.score
+      +(c.approval.fourEyes?'':' · <b>admin self-approval</b>')+(c.approval.overrides.length?' · '+c.approval.overrides.length+' override(s)':'')+'<div class="tiny muted2">Letter locked to hash '+esc(String(c.approval.hash).slice(0,16))+'…</div></div></div>';
+  } else {
+    if(open.length){
+      h+='<p class="small" style="margin-bottom:8px"><b>'+open.length+' “must” finding'+(open.length===1?'':'s')+' still open.</b> Fix the letter and re-check, or give a reason to override each one:</p>';
+      open.forEach(z=>{ h+='<div class="field"><label class="lbl">'+esc(z.x.rule)+' · '+esc(z.x.issue.slice(0,110))+'</label><input class="inp rwlOverride" data-k="'+z.k+'" placeholder="Why this does not apply here (10+ characters), e.g. the client is UK resident and the point is covered at paragraph 14"></div>'; });
+    } else h+='<p class="small" style="margin-bottom:8px">No “must” findings open. Ready for approval.</p>';
+    h+='<div class="row" style="gap:8px;margin-top:6px"><button class="btn green" style="background:var(--ok);border-color:var(--ok);color:#fff" data-a="rwlApprove"'+(RWL.busy?' disabled':'')+'>'+ic('check',15)+' Approve for submission</button>'
+      +(AUTH_USER&&AUTH_USER.email&&(c.createdBy===(AUTH_USER.name||AUTH_USER.email))?'<span class="tiny muted">You uploaded this letter, so a colleague approves it (admins can override).</span>':'')+'</div>';
+  }
+  /* submission */
+  const subs=c.submissions||[];
+  if(c.approval||subs.length){
+    h+='<div style="border-top:1px solid var(--line-2);margin-top:14px;padding-top:12px">';
+    subs.forEach(sb=>{ h+='<div class="kv"><span class="k">'+esc(sb.kind==='first'?'Sent to Blacktower':'Resubmitted')+'</span><span class="v">'+esc(rwlWhen(sb.at))+' by '+esc(sb.by)+(sb.btRef?' · ref '+esc(sb.btRef):'')+'</span></div>'; });
+    if(c.status==='approved'||c.status==='redlined'){
+      h+='<div class="row" style="gap:8px;margin-top:10px"><input class="inp" id="rwlBtRef" placeholder="Blacktower reference (optional)" style="width:260px" value="'+esc(RWL.btRef||'')+'">'
+        +'<button class="btn blue" data-a="rwlSubmit"'+(RWL.busy?' disabled':'')+'>'+ic('send',15)+(c.status==='redlined'?' Mark as resubmitted':' Mark as sent to Blacktower')+'</button></div>';
+    }
+    if((c.status==='submitted'||c.status==='resubmitted')) h+='<div class="row" style="gap:8px;margin-top:10px"><button class="btn" data-a="rwlClose" data-v="approved">'+ic('check',15)+' Blacktower approved it · close</button><button class="btn ghost" data-a="rwlClose" data-v="withdrawn">Withdrawn</button><span class="tiny muted">If it comes back instead, paste the email in step 4.</span></div>';
+    if(c.status==='closed') h+='<div class="row" style="gap:8px;margin-top:10px"><span class="bdg mut">Closed · '+esc(c.closed?c.closed.outcome:'')+'</span><button class="btn ghost sm" data-a="rwlReopen">Reopen</button></div>';
+    h+='</div>';
+  }
+  h+='</div></div>';
+  return h;
+}
+function rwlPlanHTML(c){
+  const plan=c.plan; if(!plan) return '';
+  const dry=(c.result&&c.result.dry)||{applied:[],skipped:[]};
+  const cannot=new Map((dry.skipped||[]).map(s=>[s.k,s.why]));
+  let h='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">5</span><div><h3>Review the proposed changes</h3>'
+    +'<div class="sub">Untick anything you do not want. Everything ticked goes into the Word file as a tracked change for the adviser to accept or reject.</div></div></div><div class="card-b">';
+  if(plan.points&&plan.points.length) h+='<div class="small muted mb">Points matched to the checklist: '+plan.points.map(p=>'<span class="bdg '+(p.rule==='NEW'?'or':'mut')+'" title="'+esc(p.summary)+'">'+esc(p.n)+' → '+esc(p.rule||'?')+'</span>').join(' ')+(plan.points.some(p=>p.rule==='NEW')?' <span class="tiny">· a point marked NEW matched no rule; it is listed in Insights as a rule to add.</span>':'')+'</div>';
+  if(plan.needs_adviser&&plan.needs_adviser.length)
+    h+='<div class="note warn mb"><span class="ic">'+ic('alert',15)+'</span><div><b>The adviser needs to fill in:</b><br>'+plan.needs_adviser.map(esc).join('<br>')+'</div></div>';
+  if(!plan.edits.length) h+='<p class="muted">No changes were proposed.</p>';
+  plan.edits.forEach((e,k)=>{
+    const no=cannot.has(k);
+    h+='<div style="display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-top:1px solid var(--line-2)'+(no?';opacity:.55':'')+'">'
+      +'<input type="checkbox" class="rwlTick" data-k="'+k+'"'+(no?' disabled':' checked')+' style="margin-top:3px">'
+      +'<div style="min-width:0;flex:1"><div class="small muted" style="margin-bottom:5px"><span class="bdg info">Point '+esc(e.point)+'</span> &nbsp;'+esc(RWL_OPS[e.op]||e.op)+' ['+esc(e.para)+'] '
+      +'<em>“'+esc(String(e.anchor||'').slice(0,70))+'…”</em>'+(no?' — <b style="color:var(--risk)">cannot be placed: '+esc(cannot.get(k))+'</b>':'')+'</div>'
+      +(e.op==='delete'?'':'<div style="background:var(--card-2);border:1px solid var(--line-2);border-radius:9px;padding:10px 12px;white-space:pre-wrap;font-size:13px">'+(e.lead?'<b>'+esc(e.lead)+'</b> ':'')+esc(e.text)+'</div>')
+      +'<div class="hint">'+esc(e.reason)+'</div></div></div>';
+  });
+  h+=rwlBusy()+'<div class="row" style="margin-top:14px"><button class="btn blue" data-a="rwlApply"'+(RWL.busy?' disabled':'')+'>'+ic('save',15)+' Write the redlined Word file</button></div></div></div>';
+  return h;
+}
+function rwlDoneHTML(c){
+  const r=c.result; if(!r||r.insertions==null) return '';
+  const reply=(c.plan&&c.plan.reply||'')+(r.skipped.length?'\n\nStill to do by hand:\n'+r.skipped.map(s=>'- Point '+s.edit.point+': '+s.edit.reason+' ('+s.why+')').join('\n'):'');
+  return '<div class="card" style="margin-top:16px;border-color:var(--ok)"><div class="card-h"><span class="av s" style="background:var(--ok-t);color:var(--ok-ink)">'+ic('check',14)+'</span><h3>Redlined</h3></div><div class="card-b">'
+    +'<p class="small">'+r.applied+' change'+(r.applied===1?'':'s')+' written as tracked changes ('+r.insertions+' insertions, '+r.deletions+' deletions)'
+    +(r.skipped.length?'; '+r.skipped.length+' could not be placed and are listed in the reply for the adviser.':'.')+' Open the file in Word and use Review → Accept or Reject, then mark it as resubmitted in step 3.</p>'
+    +'<div class="row" style="margin:12px 0 18px;gap:8px"><a class="btn pri" href="/api/rwl/cases/'+esc(c.id)+'/download?which=redlined" download>'+ic('dl',15)+' Download redlined letter</a></div>'
+    +'<label class="lbl">Draft reply to Compliance</label>'
+    +'<textarea class="ta" id="rwlReply" rows="7" readonly>'+esc(reply)+'</textarea>'
+    +'<div class="row" style="margin-top:8px"><button class="btn sm" data-a="rwlCopy">'+ic('copy',14)+' Copy reply</button></div></div></div>';
+}
+function rwlStripHTML(c){
+  const at=rwlStage(c);
+  return '<div class="row" style="gap:0;flex-wrap:wrap;margin-bottom:16px">'+RWL_STEPS.map((s,i)=>'<span class="bdg '+(i<at?'ok':i===at?'or':'mut')+'" style="border-radius:0;'+(i===0?'border-radius:20px 0 0 20px;':'')+(i===RWL_STEPS.length-1?'border-radius:0 20px 20px 0;':'')+'">'+(i<at?ic('check',11)+' ':'')+esc(s[1])+'</span>').join('')+'</div>';
+}
+function rwlCaseHTML(){
+  const c=RWL.cur;
+  let h='<div class="ph"><div><h1>'+esc(c.ref)+'</h1><div class="sub">'+(c.adviser?esc(c.adviser)+' · ':'')+(c.template?'from '+esc(c.template.name)+' · ':'')+esc(c.originalName||'')+' · '+rwlBadge(c.status)+' '+rwlScore(c.score)+'</div></div>'
+    +'<div class="sp row" style="gap:8px"><button class="btn" data-a="rwlHome">'+ic('chevL',15)+' All letters</button>'
+    +'<a class="btn" href="/api/rwl/cases/'+esc(c.id)+'/download?which=original" download>'+ic('dl',15)+' Original</a>'
+    +'<a class="btn" href="/api/rwl/cases/'+esc(c.id)+'/audit" download title="Every action on this case, with who and when">'+ic('clip',15)+' Audit log</a>'
+    +'<button class="btn danger" data-a="rwlDelete">'+ic('trash',15)+' Delete</button></div></div>'+rwlStripHTML(c)+rwlInfo();
+  /* step 2: pre-check */
+  h+='<div class="card"><div class="card-h"><span class="av s or">2</span><div><h3>Check against the Blacktower manual</h3>'
+    +'<div class="sub">The reviewer reads the letter against the manual and the checklist; the automatic checks reconcile names, fees, dates, currencies, template residue and readability.</div></div>'
+    +'<button class="btn sp" data-a="rwlPrecheck"'+(RWL.busy?' disabled':'')+'>'+ic('shield',15)+(c.findings?' Run the check again':' Run the check')+'</button></div>'
+    +'<div class="card-b">'+(RWL.busy==='check'?rwlBusy():'')
+    +(c.findings?'<div class="row" style="gap:14px;flex-wrap:wrap"><div><span class="tiny muted">Score</span><div style="font-size:30px;font-weight:800;line-height:1;color:var(--'+(c.score>=80?'ok':c.score>=50?'warn':'risk')+')">'+c.score+'<span class="small muted">/100</span></div></div>'
+      +(c.readability?'<div><span class="tiny muted">Readability</span><div class="small b7">'+c.readability.avgSentence+' words per sentence · '+c.readability.longSentences+' over 55</div></div>':'')+'</div>':'')
+    +rwlFindingsHTML(c.findings,c)+(c.findings||RWL.busy?'':'<p class="small muted">Not run yet. The letter cannot be marked as sent until it has been checked.</p>')+'</div></div>';
+  /* step 3: gate */
+  h+=rwlGateHTML(c);
+  /* step 4: compliance email */
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><span class="av s or">4</span><div><h3>If it comes back: paste the email from Compliance</h3><div class="sub">The whole email, as received. Each point is matched to the checklist and turned into a change.</div></div></div>'
+    +'<div class="card-b"><textarea class="ta" id="rwlEmail" rows="8" placeholder="Hi …, please see the points below …">'+esc(RWL.email)+'</textarea>'
+    +(RWL.busy==='revise'?rwlBusy():'')
+    +'<div class="row" style="margin-top:12px"><button class="btn pri" data-a="rwlRevise"'+(RWL.busy?' disabled':'')+'>'+ic('sliders',15)+' Work out the changes</button></div></div></div>';
+  h+=rwlPlanHTML(c)+rwlDoneHTML(c);
+  /* history */
+  h+='<div class="card" style="margin-top:16px"><div class="card-h"><h3>History</h3><a class="btn sm sp" href="/api/rwl/cases/'+esc(c.id)+'/audit" download>'+ic('dl',14)+' Export CSV</a></div><div class="card-b flush"><div class="tw"><table class="t"><tbody>'
+    +((c.events||[]).slice().reverse().map(e=>'<tr><td class="tiny muted" style="white-space:nowrap">'+esc(rwlWhen(e.at))+'</td><td class="tiny">'+esc(e.who||'')+'</td><td class="tiny" style="white-space:normal">'+esc(e.what)+'</td></tr>').join('')||'<tr><td class="tiny muted">Nothing yet</td></tr>')
+    +'</tbody></table></div></div></div>';
+  return h;
+}
+function screenRwl(){
+  if(RWL.view==='new') return rwlNewHTML();
+  if(RWL.view==='case'&&RWL.cur) return rwlCaseHTML();
+  return rwlListHTML();
+}
+
+/* ------------------------------ wiring ---------------------------------- */
+adminTool({id:'rwl',name:'RWL Review',icon:'shield',action:'rwlHome',screen:screenRwl,count:()=>RWL.cases.length,
+  desc:'Check and score a Reason Why Letter against the Blacktower manual before it goes, get it approved by a second pair of eyes, and when it comes back turn the compliance email into tracked changes with a draft reply.'});
+async function rwlRun(kind,fn){
+  RWL.busy=kind; rwlSetInfo(); render();
+  try{ await fn(); }
+  catch(e){ rwlSetInfo('risk',e.message||'Something went wrong.'); }
+  RWL.busy=''; render();
+}
+Object.assign(ACT,{
+  async rwlHome(){ S.screen='rwl'; RWL.view='list'; RWL.cur=null; rwlSetInfo(); render(); await rwlLoad(); render(); window.scrollTo(0,0); },
+  rwlRefresh(){ rwlRun('list',async()=>{ await rwlLoad(); }); },
+  async rwlNew(){ RWL.view='new'; RWL.file=null; RWL.ref=''; RWL.templateId=''; rwlSetInfo(); render();
+    try{ const r=await rwlApi('GET','/api/rwltpl/list'); RWL.templates=r.templates||[]; render(); }catch(e){} },
+  rwlOpen(v){ rwlRun('open',async()=>{ await rwlOpenCase(v); }); },
+  rwlUpload(){
+    RWL.ref=(($('#rwlRef')||{}).value||'').trim(); RWL.adviser=(($('#rwlAdviser')||{}).value||'').trim(); RWL.templateId=(($('#rwlTemplate')||{}).value||'');
+    if(!RWL.ref){ rwlSetInfo('warn','Give the case a reference first.'); render(); return; }
+    if(!RWL.file){ rwlSetInfo('warn','Choose the Word file first.'); render(); return; }
+    rwlRun('upload',async()=>{
+      const fd=new FormData(); fd.append('ref',RWL.ref); fd.append('adviser',RWL.adviser); fd.append('templateId',RWL.templateId||''); fd.append('file',RWL.file);
+      const r=await rwlApi('POST','/api/rwl/cases',null,fd);
+      RWL.file=null; await rwlOpenCase(r.id); await rwlLoad();
+      toast('Letter uploaded',r.paragraphs+' paragraphs read.');
+    });
+  },
+  rwlPrecheck(){ rwlRun('check',async()=>{
+    const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/precheck');
+    await rwlOpenCase(RWL.cur.id);
+    toast('Score '+r.score+'/100',r.findings.ready_to_submit?'Nothing that would stop it.':r.findings.findings.filter(x=>x.severity==='must').length+' point(s) to fix or override before it can go.',r.findings.ready_to_submit?'ok':'warn');
+  }); },
+  rwlApprove(){
+    const overrides=[...document.querySelectorAll('.rwlOverride')].map(i=>({k:Number(i.dataset.k),reason:i.value.trim()})).filter(o=>o.reason);
+    rwlRun('approve',async()=>{ await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/approve',{overrides}); await rwlOpenCase(RWL.cur.id); toast('Approved','The letter is locked at this version and can be marked as sent.','ok'); });
+  },
+  rwlSubmit(){ RWL.btRef=(($('#rwlBtRef')||{}).value||'').trim();
+    rwlRun('submit',async()=>{ const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/submit',{btRef:RWL.btRef}); RWL.btRef=''; await rwlOpenCase(RWL.cur.id); await rwlLoad(); toast(r.status==='resubmitted'?'Marked as resubmitted':'Marked as sent','Close the case when Blacktower approve it, or paste their email if it comes back.'); }); },
+  rwlClose(v){ rwlRun('close',async()=>{ await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/close',{outcome:v}); await rwlOpenCase(RWL.cur.id); await rwlLoad(); toast('Case closed',v==='approved'?'Approved by Blacktower.':'Withdrawn.'); }); },
+  rwlReopen(){ rwlRun('reopen',async()=>{ await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/reopen'); await rwlOpenCase(RWL.cur.id); await rwlLoad(); }); },
+  rwlRevise(){
+    RWL.email=(($('#rwlEmail')||{}).value||'').trim();
+    if(RWL.email.length<40){ rwlSetInfo('warn','Paste the whole email from Compliance first.'); render(); return; }
+    rwlRun('revise',async()=>{
+      const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/revise',{email:RWL.email});
+      await rwlOpenCase(RWL.cur.id); await rwlLoad();
+      toast('Changes proposed',r.plan.edits.length+' edit(s) mapped to '+r.plan.points.length+' point(s).');
+    });
+  },
+  rwlApply(){
+    const skip=[...document.querySelectorAll('.rwlTick')].filter(c=>!c.checked).map(c=>Number(c.dataset.k));
+    rwlRun('apply',async()=>{
+      const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/apply',{skip});
+      await rwlOpenCase(RWL.cur.id); await rwlLoad();
+      toast('Redlined file written',r.applied+' change(s) as tracked changes.','ok');
+    });
+  },
+  rwlDelete(){
+    if(!confirm('Delete this case and both Word files? The adviser should already have the redlined letter.')) return;
+    rwlRun('delete',async()=>{ await rwlApi('DELETE','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)); RWL.view='list'; RWL.cur=null; await rwlLoad(); });
+  },
+  rwlCopy(){ const t=$('#rwlReply'); if(!t) return; navigator.clipboard.writeText(t.value).then(()=>toast('Copied','The reply is on your clipboard.')); }
+});
+/* file picking: the drop zone and the hidden input, delegated like everything else */
+document.addEventListener('click',e=>{ const z=e.target.closest('#rwlDrop'); if(z){ const i=$('#rwlFile'); if(i) i.click(); } });
+document.addEventListener('change',e=>{ if(e.target&&e.target.id==='rwlFile'&&e.target.files[0]){ rwlPick(e.target.files[0]); } if(e.target&&e.target.id==='rwlTemplate') RWL.templateId=e.target.value; });
+document.addEventListener('dragover',e=>{ if(e.target.closest&&e.target.closest('#rwlDrop')) e.preventDefault(); });
+document.addEventListener('drop',e=>{ const z=e.target.closest&&e.target.closest('#rwlDrop'); if(z){ e.preventDefault(); if(e.dataTransfer.files[0]) rwlPick(e.dataTransfer.files[0]); } });
+document.addEventListener('input',e=>{ if(e.target&&e.target.id==='rwlEmail') RWL.email=e.target.value; if(e.target&&e.target.id==='rwlBtRef') RWL.btRef=e.target.value; });
+function rwlPick(f){
+  RWL.ref=(($('#rwlRef')||{}).value||'').trim(); RWL.adviser=(($('#rwlAdviser')||{}).value||'').trim(); RWL.templateId=(($('#rwlTemplate')||{}).value||'');
+  if(!/\.docx$/i.test(f.name)){ rwlSetInfo('warn','That is not a Word .docx file.'); render(); return; }
+  RWL.file=f; rwlSetInfo(); render();
+}

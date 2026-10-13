@@ -1,0 +1,507 @@
+/* ===========================================================================
+   FORM ENGINE
+   Typing never re-renders — the model is updated in place and saved, so the
+   caret stays where you put it. Only structural changes redraw.
+   ========================================================================= */
+function optsHTML(list,val,blank){
+  const arr=typeof list==='string'?listFor(list):(list||[]);
+  return '<option value="">'+(blank||'—')+'</option>'
+    +arr.map(o=>'<option value="'+esc(o)+'"'+(String(val)===String(o)?' selected':'')+'>'+esc(o)+'</option>').join('');
+}
+function control(fd,val,path,compact){
+  const p=' data-p="'+esc(path)+'"';
+  const cls=compact?'':'';
+  if(fd.type==='select') return '<select class="sel '+cls+'"'+p+'>'+optsHTML(fd.list,val)+'</select>';
+  if(fd.type==='textarea') return '<textarea class="ta"'+p+' rows="'+(compact?2:3)+'" placeholder="'
+    +(fd.own?'In the client’s own words…':'')+'">'+esc(val)+'</textarea>';
+  const t=fd.type==='number'?'number':fd.type==='date'?'date':fd.type==='email'?'email':fd.type==='tel'?'tel':'text';
+  return '<input class="inp '+cls+'" type="'+t+'"'+p+' value="'+esc(val)+'"'
+    +(fd.type==='number'?' step="any"':'')+'>';
+}
+function fieldHTML(fd,val,path){
+  return '<div class="field'+(fd.full?' full':'')+'">'
+    +'<label class="lbl">'+esc(fd.label)+(fd.req?' <span class="req">*</span>':'')+'</label>'
+    +control(fd,val,path)
+    +(fd.hint?'<div class="hint">'+esc(fd.hint)+'</div>':'')
+    +'</div>';
+}
+function fieldsGrid(fields,vals,prefix){
+  /* A field carrying `sub:` starts a named block. Blocks fold away unless
+     something in them is already filled in (or they are marked open), so a
+     long section reads as a short one until it is your turn to use it. */
+  const V=vals||{};
+  const blocks=[{sub:null,fields:[]}];
+  fields.forEach(fd=>{ if(fd.sub) blocks.push({sub:fd.sub,hint:fd.subHint,open:!!fd.open,fields:[]});
+    blocks[blocks.length-1].fields.push(fd); });
+  const grid=list=>{
+    const full=[],half=[];
+    list.forEach(fd=>{
+      const h=fieldHTML(fd,V[fd.id]==null?'':V[fd.id],prefix+'|'+fd.id);
+      (fd.full?full:half).push(h);
+    });
+    return '<div class="grid g2" style="align-items:start">'+half.join('')+'</div>'
+      +(full.length?'<div style="margin-top:2px">'+full.join('')+'</div>':'');
+  };
+  return blocks.filter(b=>b.fields.length).map(b=>{
+    if(!b.sub) return grid(b.fields);
+    const filled=b.fields.filter(fd=>V[fd.id]!=null&&V[fd.id]!=='').length;
+    return '<details class="fblock"'+(b.open||filled?' open':'')+'>'
+      +'<summary><span class="fb-t">'+esc(b.sub)+'</span>'
+      +(filled?'<span class="bdg ok">'+filled+' filled</span>':'<span class="bdg mut">empty</span>')
+      +ic('chevD',15)+'</summary>'
+      +(b.hint?'<div class="hint" style="margin:0 0 10px">'+esc(b.hint)+'</div>':'')
+      +grid(b.fields)+'</details>';
+  }).join('');
+}
+
+/* ------------------------------ repeating ------------------------------- */
+function rowsTable(c,s){
+  const rows=c.data[s.id]||[];
+  /* Columns marked `reco:` belong to the application, not the fact find — they
+     are edited in the Recommendation section instead of widening this table. */
+  const cols=s.cols.filter(x=>!x.reco);
+  if(!rows.length){
+    const declared=(c.declared||{})[s.id];
+    return '<div class="empty">'
+      +'<div class="ei">'+ic(s.icon,22)+'</div>'
+      +'<h4>Nothing recorded yet</h4>'
+      +'<p>Add an entry, or confirm the client has none so this section stops showing as outstanding.</p>'
+      +'<div class="row" style="justify-content:center;margin-top:14px;gap:8px">'
+      +'<button class="btn pri" data-a="rowAdd" data-s="'+s.id+'">'+ic('plus',15)+' Add entry</button>'
+      +'<button class="btn'+(declared?' pri':'')+'" data-a="declareNone" data-s="'+s.id+'">'
+      +(declared?ic('check',15)+' Confirmed: none':'Client has none')+'</button>'
+      +'</div></div>';
+  }
+  let h='<div class="tw"><table class="t"><thead><tr><th style="width:34px"></th>';
+  cols.forEach(col=>h+='<th style="min-width:'+(col.w||130)+'px">'+esc(col.label)
+    +(col.req?' <span style="color:var(--orange)">*</span>':'')+'</th>');
+  h+='<th style="width:40px"></th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    h+='<tr><td class="muted2 tiny b8">'+(i+1)+'</td>';
+    cols.forEach(col=>{
+      h+='<td>'+control(col,r[col.id]==null?'':r[col.id],'ROW|'+s.id+'|'+r._id+'|'+col.id,1)+'</td>';
+    });
+    h+='<td><button class="btn xs ghost" data-a="rowDel" data-s="'+s.id+'" data-r="'+r._id
+      +'" title="Remove" aria-label="Remove row '+(i+1)+'">'+ic('trash',14)+'</button></td></tr>';
+  });
+  h+='</tbody></table></div>';
+  h+='<div class="row" style="padding:12px 16px;gap:8px;border-top:1px solid var(--line-2)">'
+    +'<button class="btn sm" data-a="rowAdd" data-s="'+s.id+'">'+ic('plus',14)+' Add entry</button>';
+  /* Money columns get a per-currency subtotal — the only arithmetic here. */
+  const moneyCols=cols.filter(x=>x.type==='number'&&/value|amount|balance|cetv|income|sumAssured/i.test(x.id));
+  if(moneyCols.length&&cols.some(x=>x.id==='ccy')){
+    const by={}; rows.forEach(r=>{ const cc=r.ccy||c.data.meta.ffCurrency||'GBP';
+      by[cc]=(by[cc]||0)+(Number(r[moneyCols[0].id])||0); });
+    const tot=Object.keys(by).filter(k=>by[k]).map(k=>money(by[k],k)).join(' · ');
+    if(tot) h+='<span class="sp small muted"><b class="b8">'+esc(moneyCols[0].label)+' total:</b> '+tot+'</span>';
+  }
+  h+='</div>';
+  return h;
+}
+
+/* -------------------------- applicant tab switch ------------------------ */
+function applicantTabs(c,sid){
+  const on=S.applicant;
+  const has2=hasApplicant2(c);
+  const p=c.data.personal||{};
+  const n1=(p.a1||{}).firstName||'Applicant 1';
+  const n2=(p.a2||{}).firstName||'Applicant 2';
+  return '<div class="row" style="gap:6px">'
+    +['a1','a2'].map(k=>{
+      const lbl=k==='a1'?n1:n2;
+      const dim=k==='a2'&&!has2;
+      return '<button class="btn sm'+(on===k?' dark':'')+'" data-a="applicant" data-k="'+k+'"'
+        +(dim?' style="opacity:.62"':'')+'>'+esc(lbl)+(dim?' · add':'')+'</button>';
+    }).join('')+'</div>';
+}
+
+/* ===========================================================================
+   SCREENS
+   ========================================================================= */
+const S={ screen:'clients', clientId:null, section:'meta', applicant:'a1', q:'', flow:null, group:null };
+
+function railHTML(){
+  const items=[
+    ['clients','users','Clients'],
+    ['requests','clip','Work requests'],
+    ['export','dl','Export & backup'],
+    ['settings','cog','Settings']
+  ];
+  const open=DB.requests.filter(r=>r.status!=='Complete').length;
+  return '<aside class="rail">'
+    +'<div class="rail-top"><div class="row">'+logo(24,1)+'</div>'
+    +'<div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:rgba(255,255,255,.45);'
+    +'font-weight:800;margin-top:9px">Adviser Portal</div></div>'
+    +'<nav class="rail-nav">'
+    +items.map(([id,i,n])=>'<button class="rail-item'+(S.screen===id?' on':'')+'" data-a="go" data-v="'+id+'">'
+      +ic(i,16)+'<span>'+n+'</span>'
+      +(id==='clients'&&DB.clients.length?'<span class="pc">'+DB.clients.length+'</span>':'')
+      +(id==='requests'&&open?'<span class="pc">'+open+'</span>':'')+'</button>').join('')
+    +'<div class="rail-lbl">Recent</div>'
+    +(DB.clients.slice().sort((a,b)=>(b.updated||'').localeCompare(a.updated||'')).slice(0,6)
+      .map(c=>'<button class="rail-item'+(S.clientId===c.id&&S.screen==='client'?' on':'')
+        +'" data-a="open" data-v="'+c.id+'"><span class="av s dk">'+esc(initials(clientName(c)))+'</span>'
+        +'<span class="trunc" style="min-width:0">'+esc(clientName(c))+'</span>'
+        +'<span class="pc">'+overall(c)+'%</span></button>').join('')
+      ||'<div style="padding:6px 11px;font-size:12px;color:rgba(255,255,255,.4)">No clients yet</div>')
+    +'</nav>'
+    +'<div class="rail-foot">'
+    +'<button class="btn sm pri blk" data-a="newClient">'+ic('plus',15)+' New client</button>'
+    +'<div class="tiny" style="color:rgba(255,255,255,.4);margin-top:10px;text-align:center">'
+    +'Saved in this browser<br><span title="When this copy of the app was built. If it does not match what you '
+      +'were told was deployed, reload the page with Ctrl+Shift+R.">build '+esc(BUILD)+'</span></div></div></aside>';
+}
+function topHTML(){
+  return '<header class="top">'
+    +'<button class="btn sm ghost" data-a="go" data-v="clients" style="display:none">'+ic('chevL',15)+'</button>'
+    +'<div class="row" style="gap:9px">'+logo(20)+'<span class="b8" style="font-size:14px">Adviser Portal</span></div>'
+    +'<div class="sp row" style="gap:10px">'
+    +'<span class="saved" id="savedFlag"></span>'
+    +'<button class="btn sm" data-a="go" data-v="export">'+ic('dl',15)+' Export</button>'
+    +'<button class="btn sm pri" data-a="newClient">'+ic('plus',15)+' New client</button>'
+    +'</div></header>';
+}
+
+/* ------------------------------ clients list ---------------------------- */
+function screenClients(){
+  const q=S.q.toLowerCase();
+  const list=DB.clients.filter(c=>!q||clientName(c).toLowerCase().includes(q)
+    ||(c.ref||'').toLowerCase().includes(q)||primaryEmail(c).toLowerCase().includes(q))
+    .sort((a,b)=>(b.updated||'').localeCompare(a.updated||''));
+  let h='<div class="ph"><div><h1>Clients</h1>'
+    +'<div class="sub">'+DB.clients.length+' record'+(DB.clients.length===1?'':'s')
+    +' held in this browser'+(LAST_SAVE?' · last saved '+d2(LAST_SAVE.getHours())+':'+d2(LAST_SAVE.getMinutes()):'')
+    +'</div></div>'
+    +'<div class="sp row" style="gap:8px">'
+    +'<div style="position:relative"><span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-4)">'
+    +ic('search',15)+'</span>'
+    +'<input class="inp" id="q" placeholder="Search name, reference or email" value="'+esc(S.q)
+    +'" style="padding-left:32px;width:250px"></div>'
+    +'<button class="btn" data-a="importOpen">'+ic('up',15)+' Import reply</button>'
+    +'<button class="btn blue" data-a="quickSend">'+ic('send',15)+' Send to a new client</button>'
+    +'<button class="btn pri" data-a="newClient">'+ic('plus',15)+' New client</button></div></div>';
+
+  if(!DB.clients.length){
+    return h+'<div class="card"><div class="empty">'
+      +'<div class="ei">'+ic('users',24)+'</div>'
+      +'<h4>Start your first client</h4>'
+      +'<p>Add a client and work through the Fact Find sections. Everything you type is saved to this browser '
+      +'as you go — nothing is sent anywhere until you press a send or export button.</p>'
+      +'<div class="row" style="justify-content:center;margin-top:16px;gap:8px">'
+      +'<button class="btn pri" data-a="newClient">'+ic('plus',15)+' New client</button>'
+      +'<button class="btn" data-a="restoreOpen">'+ic('up',15)+' Restore a backup</button>'
+      +'</div></div></div>';
+  }
+  if(!list.length) return h+'<div class="card"><div class="empty"><h4>No matches</h4><p>Nothing matches “'+esc(S.q)+'”.</p></div></div>';
+
+  h+='<div class="card"><div class="tw"><table class="t"><thead><tr>'
+    +'<th>Client</th><th>Reference</th><th>Status</th><th>Risk</th>'
+    +'<th class="r">Investable</th><th style="width:150px">Fact Find</th><th>Updated</th><th style="width:40px"></th>'
+    +'</tr></thead><tbody>';
+  list.forEach(c=>{
+    const pc=overall(c), r=(c.data.risk||{}).a1||{};
+    const inv=investableTotals(c);
+    const band=pc>=90?'ok':pc>=50?'or':'warn';
+    h+='<tr class="clk" data-a="open" data-v="'+c.id+'">'
+      +'<td><div class="row" style="gap:9px"><span class="av s">'+esc(initials(clientName(c)))+'</span>'
+      +'<div style="min-width:0"><div class="nm trunc">'+esc(clientName(c))+'</div>'
+      +'<div class="tiny mu trunc">'+esc(primaryEmail(c)||'No email recorded')+'</div></div></div></td>'
+      +'<td class="mono mu">'+esc(c.ref)+'</td>'
+      +'<td><span class="bdg '+(c.status==='Complete'?'ok':c.status==='On hold'?'mut':'info')+'">'
+      +'<span class="dot"></span>'+esc(c.status)+'</span></td>'
+      +'<td>'+(r.atrChosen?'<span class="bdg mut">'+esc(r.atrChosen)+'</span>':'<span class="muted2">—</span>')+'</td>'
+      +'<td class="r b7">'+esc(ccyList(inv))+'</td>'
+      +'<td><div class="row" style="gap:8px"><div class="pb t" style="flex:1"><i class="'+band
+      +'" style="width:'+pc+'%;background:var(--'+(band==='ok'?'ok':band==='or'?'orange':'warn')+')"></i></div>'
+      +'<span class="tiny b8" style="width:32px;text-align:right">'+pc+'%</span></div></td>'
+      +'<td class="mu tiny">'+esc(fdateS(c.updated))+'</td>'
+      +'<td class="muted2">'+ic('chev',15)+'</td></tr>';
+  });
+  h+='</tbody></table></div></div>';
+  h+='<div class="row wrapf mt" style="gap:8px">'
+    +'<button class="btn sm" data-a="dl" data-v="clients">'+ic('dl',14)+' Client list CSV</button>'
+    +'<button class="btn sm" data-a="dl" data-v="full">'+ic('dl',14)+' Everything CSV</button>'
+    +'<button class="btn sm" data-a="go" data-v="export">More export options</button></div>';
+  return h;
+}
+
+/* ------------------------------ client shell ---------------------------- */
+function screenClient(){
+  const c=getClient(S.clientId);
+  if(!c) return '<div class="empty"><h4>That client is no longer here</h4>'
+    +'<p>It may have been deleted.</p><div class="mt"><button class="btn" data-a="go" data-v="clients">Back to clients</button></div></div>';
+  const pc=overall(c), miss=missingFor(c);
+  const s=sectionById(S.section)||SECTIONS[0];
+
+  let h='<div class="row" style="gap:8px;margin-bottom:14px">'
+    +'<button class="btn sm ghost" data-a="go" data-v="clients">'+ic('chevL',15)+' All clients</button></div>';
+
+  /* header */
+  h+='<div class="card mb"><div class="card-b">'
+    +'<div class="row top wrapf" style="gap:14px">'
+    +'<span class="av l or">'+esc(initials(clientName(c)))+'</span>'
+    +'<div style="min-width:180px;flex:1">'
+    +'<h1 style="font-size:21px">'+esc(clientName(c))+'</h1>'
+    +'<div class="row wrapf small muted" style="gap:10px;margin-top:5px">'
+    +'<span class="mono">'+esc(c.ref)+'</span>'
+    +'<span>·</span><span>'+esc(c.data.meta.ffCurrency||'GBP')+'</span>'
+    +(c.data.meta.adviser?'<span>·</span><span>'+esc(c.data.meta.adviser)+'</span>':'')
+    +'<span>·</span><span>Updated '+esc(fdateS(c.updated))+'</span></div></div>'
+    +'<div style="min-width:190px">'
+    +'<div class="row" style="justify-content:space-between;margin-bottom:5px">'
+    +'<span class="label">Fact Find</span><span class="b8">'+pc+'%</span></div>'
+    +'<div class="pb"><i class="'+(pc>=90?'ok':pc>=50?'or':'warn')+'" style="width:'+pc+'%"></i></div>'
+    +'<div class="tiny muted2" style="margin-top:5px">'+(miss.length?miss.length+' required field'
+      +(miss.length===1?'':'s')+' outstanding':'All required fields complete')+'</div></div>'
+    +'</div>'
+    +'<div class="row wrapf" style="gap:7px;margin-top:15px;padding-top:14px;border-top:1px solid var(--line-2)">'
+    +'<button class="btn sm pri" data-a="sendOpen">'+ic('send',14)+' Send a link</button>'
+    +'<button class="btn sm" data-a="importOpen">'+ic('up',14)+' Import reply</button>'
+    +'<button class="btn sm dark" data-a="wrOpen">'+ic('clip',14)+' Raise work request</button>'
+    +'<button class="btn sm blue" data-a="madsOpen">'+ic('swap',14)+' Create the MADS</button>'
+    +'<button class="btn sm" data-a="dl" data-v="madsOne">'+ic('dl',14)+' MADS CSV</button>'
+    +'<button class="btn sm" data-a="dlClient">'+ic('dl',14)+' Export this client</button>'
+    +'<button class="btn sm" data-a="missing">'+ic('alert',14)+' Outstanding ('+miss.length+')</button>'
+    +'<select class="sel sm" data-a="status" style="width:auto;padding:6px 30px 6px 11px;font-size:12.5px">'
+    +optsHTML(['Fact Find in progress','Awaiting client','Fact Find returned','Ready for advice','Advice given','Complete','On hold'],c.status,'Status')
+    +'</select>'
+    +'<button class="btn sm ghost danger sp" data-a="delClient">'+ic('trash',14)+'</button>'
+    +'</div></div></div>';
+
+  /* section nav + panel */
+  h+='<div style="display:grid;grid-template-columns:236px 1fr;gap:18px;align-items:start" class="ffgrid">';
+  h+='<div class="card" style="position:sticky;top:74px"><div class="card-b" style="padding:11px">';
+  SECTION_GROUPS.forEach(g=>{
+    const secs=SECTIONS.filter(x=>x.group===g);
+    if(!secs.length) return;
+    h+='<div class="label" style="padding:9px 10px 5px">'+esc(g)+'</div><div class="sect-nav">';
+    secs.forEach(x=>{
+      const st=sectionStats(c,x);
+      const col=st.pct>=100?'var(--ok)':st.pct>0?'var(--warn)':'var(--ink-4)';
+      h+='<button class="sect-btn'+(x.id===s.id?' on':'')+'" data-a="sect" data-v="'+x.id+'">'
+        +ic(x.icon,15)+'<span class="trunc" style="min-width:0">'+esc(x.name)+'</span>'
+        +'<span class="pc" style="color:'+col+'">'+(st.pct>=100?'✓':st.pct+'%')+'</span></button>';
+    });
+    h+='</div>';
+  });
+  h+='</div></div>';
+
+  h+='<div class="card"><div class="card-h">'
+    +'<span style="color:var(--blue)">'+ic(s.icon,18)+'</span>'
+    +'<div style="min-width:0"><h3>'+esc(s.name)+'</h3>'
+    +(s.desc?'<div class="sub">'+esc(s.desc)+'</div>':'')+'</div>'
+    +'<div class="sp">'+(s.per==='applicant'?applicantTabs(c,s.id):'')+'</div>'
+    +'</div>';
+  if(s.rows) h+='<div class="card-b flush">'+rowsTable(c,s)+'</div>';
+  else if(s.per==='applicant'){
+    const w=S.applicant;
+    if(w==='a2'&&!hasApplicant2(c)&&s.id!=='personal'){
+      h+='<div class="card-b"><div class="note info">'+'<span class="ic">'+ic('info',15)+'</span>'
+        +'<div>There is no second applicant yet. Add their name and date of birth in '
+        +'<b>Personal details</b> and the rest of the Fact Find will open up for them.</div></div>'
+        +'<div class="mt"><button class="btn sm" data-a="sect" data-v="personal">Go to Personal details</button></div></div>';
+    } else {
+      h+='<div class="card-b">'+fieldsGrid(s.fields,(c.data[s.id]||{})[w],s.id+'|'+w)+'</div>';
+    }
+  }
+  else h+='<div class="card-b">'+fieldsGrid(s.fields,c.data[s.id],s.id+'|_')+extraPanel(c,s)+'</div>';
+
+  /* section footer: move through in order */
+  const i=SECTIONS.findIndex(x=>x.id===s.id);
+  h+='<div class="row" style="padding:12px 18px;border-top:1px solid var(--line-2);gap:8px">'
+    +(i>0?'<button class="btn sm" data-a="sect" data-v="'+SECTIONS[i-1].id+'">'+ic('chevL',14)+' '+esc(SECTIONS[i-1].name)+'</button>':'')
+    +(i<SECTIONS.length-1?'<button class="btn sm pri sp" data-a="sect" data-v="'+SECTIONS[i+1].id+'">'
+      +esc(SECTIONS[i+1].name)+' '+ic('chev',14)+'</button>':'<span class="sp small muted">Last section</span>')
+    +'</div>';
+  h+='</div></div>';
+  return h;
+}
+/* Small computed read-outs that belong with a specific section. */
+function extraPanel(c,s){
+  if(s.id==='incomeExp'){
+    const v=c.data.incomeExp||{}, cc=c.data.meta.ffCurrency||'GBP';
+    const emp=c.data.employment||{};
+    const inc=(Number((emp.a1||{}).salary)||0)+(Number((emp.a1||{}).bonus)||0)
+      +(Number((emp.a2||{}).salary)||0)+(Number((emp.a2||{}).bonus)||0);
+    const exp=['expTotal','expMortgage','expLoans','expCards'].reduce((t,k)=>t+(Number(v[k])||0),0);
+    const sav=Number(v.savings)||0;
+    return '<div class="hr"></div><div class="grid g3">'
+      +'<div><div class="label">Gross income</div><div class="big b8">'+money(inc,cc)+'</div>'
+      +'<div class="tiny muted2">Salaries and bonuses come from Employment</div></div>'
+      +'<div><div class="label">Total expenditure</div><div class="big b8">'+money(exp,cc)+'</div>'
+      +'<div class="tiny muted2">Living costs plus mortgage, loans and cards</div></div>'
+      +'<div><div class="label">Gross surplus</div><div class="big b8" style="color:'
+      +(inc-exp-sav>=0?'var(--ok)':'var(--risk)')+'">'+money(inc-exp-sav,cc)+'</div>'
+      +'<div class="tiny muted2">Before tax — this is not a net figure</div></div></div>';
+  }
+  return '';
+}
+
+/* ------------------------------- requests ------------------------------- */
+function screenRequests(){
+  const list=DB.requests.slice().sort((a,b)=>(b.created||'').localeCompare(a.created||''));
+  let h='<div class="ph"><div><h1>Work requests</h1>'
+    +'<div class="sub">Jobs raised for the admin teams. Each one is an email you send from your own account.</div></div>'
+    +'<div class="sp row" style="gap:8px">'
+    +(DB.requests.length?'<button class="btn" data-a="dl" data-v="requests">'+ic('dl',15)+' Export CSV</button>':'')
+    +'<button class="btn pri" data-a="wrPick">'+ic('plus',15)+' Raise request</button></div></div>';
+  if(!list.length) return h+'<div class="card"><div class="empty"><div class="ei">'+ic('clip',24)+'</div>'
+    +'<h4>No requests raised</h4><p>Open a client and press <b>Raise work request</b>, or start one here and pick '
+    +'the client as you go.</p><div class="mt"><button class="btn pri" data-a="wrPick">Raise a request</button></div></div></div>';
+  h+='<div class="card"><div class="tw"><table class="t"><thead><tr><th>Request</th><th>Client</th><th>Team</th>'
+    +'<th>Raised</th><th>Status</th><th style="width:230px"></th></tr></thead><tbody>';
+  list.forEach(r=>{
+    const c=getClient(r.clientId), t=wrType(r.type)||{name:r.type,team:''};
+    h+='<tr><td><div class="nm">'+esc(t.name)+'</div><div class="tiny mu mono">'+esc(r.ref)+'</div></td>'
+      +'<td>'+(c?'<button class="btn xs ghost" data-a="open" data-v="'+c.id+'">'+esc(clientName(c))+'</button>'
+        :'<span class="muted2">Deleted</span>')+'</td>'
+      +'<td class="mu">'+esc(r.fields.team||t.team)+'</td>'
+      +'<td class="mu tiny">'+esc(fdateS(r.created))+'</td>'
+      +'<td><span class="bdg '+(r.status==='Complete'?'ok':r.status==='Sent'?'info':'warn')+'">'
+      +'<span class="dot"></span>'+esc(r.status)+'</span></td>'
+      +'<td class="r"><div class="row" style="gap:6px;justify-content:flex-end">'
+      +'<button class="btn xs" data-a="wrView" data-v="'+r.id+'">View</button>'
+      +'<button class="btn xs blue" data-a="wrSend" data-v="'+r.id+'">'+ic('mail',13)+' Email</button>'
+      +'<button class="btn xs" data-a="wrDone" data-v="'+r.id+'">'+(r.status==='Complete'?'Reopen':'Done')+'</button>'
+      +'<button class="btn xs ghost danger" data-a="wrDel" data-v="'+r.id+'">'+ic('trash',13)+'</button>'
+      +'</div></td></tr>';
+  });
+  h+='</tbody></table></div></div>';
+  return h;
+}
+
+/* -------------------------------- export -------------------------------- */
+function screenExport(){
+  const tables=SECTIONS.filter(s=>s.rows);
+  let h='<div class="ph"><div><h1>Export &amp; backup</h1>'
+    +'<div class="sub">CSV for working with the data, JSON for keeping a copy of it.</div></div></div>';
+  /* The MADS export is the one the admin team actually consume, so it leads. */
+  h+='<div class="card mb"><div class="card-h"><span style="color:var(--orange)">'+ic('swap',18)+'</span>'
+    +'<div><h3>MADS import</h3><div class="sub">The format the admin team mail-merge from</div></div>'
+    +'<span class="bdg or sp"><span class="dot"></span>'+MADS_COLS.length.toLocaleString('en-GB')+' columns</span></div>'
+    +'<div class="card-b">'
+    +'<p class="small" style="line-height:1.65;margin-bottom:14px">Every column of the MADS <b>Template</b> sheet, '
+    +'in its exact order and under its exact heading. Fields the Fact Find does not capture come out empty rather '
+    +'than missing — dropping a column would shift everything after it and quietly break the merge. Paste a row '
+    +'straight into the Template sheet.</p>'
+    +'<div class="row wrapf" style="gap:8px">'
+    +'<button class="btn pri" data-a="dl" data-v="mads">'+ic('dl',15)+' All clients</button>'
+    +'<button class="btn" data-a="copyCsv" data-v="mads">'+ic('copy',15)+' Copy</button>'
+    +'</div>'
+    +'<div class="note info mt"><span class="ic">'+ic('info',15)+'</span><div>Columns ending <b>“in FF Currency”</b> '
+    +'are left blank on purpose — those cells are formulas in the workbook and need to calculate themselves. '
+    +'Dates are written as DD/MM/YYYY.</div></div>'
+    +'</div></div>';
+  h+='<div class="grid g2">';
+  h+='<div class="card"><div class="card-h"><span style="color:var(--blue)">'+ic('dl',18)+'</span><h3>CSV</h3></div>'
+    +'<div class="card-b"><div class="stack">'
+    +expBtn('clients','Client list','One row per client with headline figures.')
+    +expBtn('full','Everything','One row per field. Nothing is summarised or dropped.')
+    +expBtn('requests','Work requests','Every request raised, with its details.')
+    +'</div>'
+    +'<div class="hr"></div><div class="label" style="margin-bottom:9px">Individual tables</div>'
+    +'<div class="row wrapf" style="gap:6px">'
+    +tables.map(s=>'<button class="btn xs" data-a="dl" data-v="tbl:'+s.id+'">'+esc(s.name)+'</button>').join('')
+    +'</div>'
+    +'<div class="note mut mt"><span class="ic">'+ic('info',15)+'</span><div>Files are UTF-8 with a byte-order mark, '
+    +'so accented names and currency symbols open correctly in Excel. If your browser will not allow a download, '
+    +'use <b>Copy</b> and paste straight into a sheet.</div></div>'
+    +'</div></div>';
+  h+='<div class="card"><div class="card-h"><span style="color:var(--orange)">'+ic('save',18)+'</span>'
+    +'<h3>Backup</h3></div><div class="card-b">'
+    +'<div class="note warn"><span class="ic">'+ic('alert',15)+'</span><div>Everything is stored in <b>this browser '
+    +'on this machine</b>. Clearing site data, or using a different computer or profile, means starting again. '
+    +'Take a backup regularly and keep it somewhere safe.</div></div>'
+    +'<div class="stack mt">'
+    +'<button class="btn blk dark" data-a="backup">'+ic('dl',15)+' Download a full backup (JSON)</button>'
+    +'<button class="btn blk" data-a="restoreOpen">'+ic('up',15)+' Restore from a backup</button>'
+    +'</div><div class="hr"></div>'
+    +'<div class="kv"><span class="k">Clients</span><span class="v">'+DB.clients.length+'</span></div>'
+    +'<div class="kv"><span class="k">Work requests</span><span class="v">'+DB.requests.length+'</span></div>'
+    +'<div class="kv"><span class="k">Links sent</span><span class="v">'+DB.sends.length+'</span></div>'
+    +'<div class="kv"><span class="k">Storage</span><span class="v">'+storeSize()+'</span></div>'
+    +'<div class="kv"><span class="k">Last saved</span><span class="v">'
+    +(LAST_SAVE?fdt(LAST_SAVE):'—')+'</span></div>'
+    +'</div></div>';
+  h+='</div>';
+  return h;
+}
+function expBtn(v,title,sub){
+  return '<div class="row" style="gap:8px;padding:11px 12px;border:1px solid var(--line);border-radius:11px">'
+    +'<div style="flex:1;min-width:0"><div class="b7">'+esc(title)+'</div>'
+    +'<div class="tiny muted">'+esc(sub)+'</div></div>'
+    +'<button class="btn sm" data-a="copyCsv" data-v="'+v+'">'+ic('copy',14)+'</button>'
+    +'<button class="btn sm pri" data-a="dl" data-v="'+v+'">'+ic('dl',14)+' CSV</button></div>';
+}
+function storeSize(){
+  try{ const n=(localStorage.getItem(CFG.storeKey)||'').length;
+    return n>1048576?(n/1048576).toFixed(1)+' MB':Math.round(n/1024)+' KB'; }catch(e){ return '—'; }
+}
+
+/* ------------------------------- settings ------------------------------- */
+function screenSettings(){
+  const s=DB.settings;
+  const F=[ f('adviserName','Your name','text'), f('adviserEmail','Your email','email'),
+    f('adviserPhone','Your telephone','tel'),
+    f('adminEmail','Admin work request inbox','email',{hint:'Where “Raise work request” emails are addressed.'}),
+    f('ccEmail','Always copy in (optional)','email'),
+    f('portalBase','Client link base URL','text',{hint:'The address your Fact Find and questionnaire links point at.'}) ];
+  let h='<div class="ph"><div><h1>Settings</h1><div class="sub">Used to pre-fill new records and address the emails you send.</div></div></div>';
+  h+='<div class="card" style="max-width:620px"><div class="card-b">';
+  F.forEach(fd=>{ h+=fieldHTML(fd,s[fd.id]==null?(fd.id==='adminEmail'?CFG.adminEmail:fd.id==='portalBase'?CFG.portalBase:''):s[fd.id],'SET|_|'+fd.id); });
+  h+='<div class="hr"></div>'
+    +'<div class="note mut"><span class="ic">'+ic('shield',15)+'</span><div>This tool holds client personal data. '
+    +'It stays on this device and is never transmitted by the page itself — the only things that leave are the '
+    +'emails you choose to send and the files you choose to download.</div></div>'
+    +'<div class="hr"></div>'
+    +'<button class="btn danger" data-a="wipe">'+ic('trash',15)+' Delete everything</button>'
+    +'</div></div>';
+
+  /* "Where's the link, and why doesn't the other copy have my clients?" comes
+     up every time — so the tool answers it rather than the conversation. */
+  const here=window.claude?'published':'local';
+  h+='<div class="card mt" style="max-width:620px"><div class="card-h">'
+    +'<span style="color:var(--blue)">'+ic('link',18)+'</span>'
+    +'<div><h3>Where this tool lives</h3><div class="sub">Two copies, separate data</div></div>'
+    +'<span class="bdg '+(here==='local'?'ok':'info')+' sp"><span class="dot"></span>'
+    +'In the '+here+' copy</span></div><div class="card-b">'
+    +'<div class="label mb-s">Published link</div>'
+    +'<div class="row" style="gap:7px;margin-bottom:6px">'
+    +'<input class="inp mono" readonly value="'+esc(CFG.publishedUrl)+'">'
+    +'<button class="btn sm" data-a="copyUrl">'+ic('copy',14)+'</button></div>'
+    +'<div class="hint" style="margin-bottom:16px">Shareable, works anywhere. Cannot save a MADS workbook — a '
+    +'published page is not permitted to hand over an .xlsm.</div>'
+    +'<div class="label mb-s">File on your machine</div>'
+    +'<div class="mono small" style="padding:9px 11px;background:var(--bg);border:1px solid var(--line);'
+    +'border-radius:9px;word-break:break-all;margin-bottom:6px">'+esc(CFG.localFile)+'</div>'
+    +'<div class="hint">Open it straight from your desktop. Everything works there, including <b>Create the MADS</b>.</div>'
+    +'<div class="note warn mt"><span class="ic">'+ic('alert',15)+'</span><div>Each copy keeps its own clients — '
+    +'the browser stores them separately. To move work between them, take a <b>backup</b> from Export in one and '
+    +'<b>restore</b> it in the other.</div></div>'
+    +'</div></div>';
+  return h;
+}
+
+/* ================================ MODALS ================================= */
+function openModal(html,wide){
+  closeModal();
+  const sc=document.createElement('div'); sc.className='scrim'; sc.id='scrim';
+  sc.addEventListener('click',dismissModal);
+  const m=document.createElement('div'); m.className='modal'+(wide?' wide':''); m.id='modal';
+  m.setAttribute('role','dialog'); m.setAttribute('aria-modal','true');
+  m.innerHTML=html;
+  document.body.appendChild(sc); document.body.appendChild(m);
+  document.body.style.overflow='hidden';
+  const fi=m.querySelector('input,select,textarea,button'); if(fi&&!('ontouchstart' in window)) fi.focus();
+}
+/* Tears down the DOM only — a wizard re-renders itself by calling openModal
+   again, so this must not touch the flow state it depends on. */
+function closeModal(){ const a=$('#modal'),b=$('#scrim');
+  if(a)a.remove(); if(b)b.remove(); document.body.style.overflow=''; }
+/* What the close button and the backdrop do: shut it and abandon the flow. */
+function dismissModal(){ closeModal(); S.flow=null; }
+function mHead(title,sub){
+  return '<div class="m-h"><div style="min-width:0"><h3>'+esc(title)+'</h3>'
+    +(sub?'<div class="s">'+esc(sub)+'</div>':'')+'</div>'
+    +'<button class="x" data-a="close" aria-label="Close">'+ic('x',15)+'</button></div>';
+}
