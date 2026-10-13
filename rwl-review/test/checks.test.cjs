@@ -32,4 +32,16 @@ ok(!by(cc,'C10').length,'C10: not flagged when the letter explains the differenc
 
 ok(R.RWL_RUBRIC.some(r=>r.id==='R17')&&R.RWL_RUBRIC.some(r=>r.id==='R18')&&R.RWL_RUBRIC.some(r=>r.id==='R19'),'rubric carries R17, R18, R19');
 ok(/capacity for loss must be its own/i.test(R.RWL_RUBRIC.find(r=>r.id==='R8').rule),'R8 asks for capacity for loss as its own statement');
+
+/* C11 closing a holding, C12 cost saving (from the bounce-back of the same day) */
+const note=['Mr Peter Marlow','Dear Mr Marlow','I recommend closing the structured note and moving the proceeds to the portfolio.','Yours sincerely'];
+cc=R.codeChecks(L(note),{});
+ok(by(cc,'C11').length===1&&by(cc,'C11')[0].severity==='should','C11: closing a note with no word on the impact');
+cc=R.codeChecks(L(note.concat(['The note matures in 2028; sold now it would realise 96% of face value and you would give up the final bonus.'])),{});
+ok(!by(cc,'C11').length,'C11: not flagged once the impact is stated');
+cc=R.codeChecks(L(['Mr Peter Marlow','Dear Mr Marlow','You would like to retain the products but your objective is saving costs on the ongoing charges.','The new ongoing charge is 0.9% a year.']),{});
+ok(by(cc,'C12').length===1,'C12: a saving claimed with no existing charges shown');
+cc=R.codeChecks(L(['Mr Peter Marlow','Dear Mr Marlow','Your objective is saving costs on the ongoing charges.','Your existing adviser charge is 1.5% a year and the existing fund charge is 0.8%; the new charges are 0.65% and 0.4%, a saving of 1.25% a year.']),{});
+ok(!by(cc,'C12').length,'C12: not flagged when the existing charges are shown beside the new ones');
+ok(R.RWL_RUBRIC.some(r=>r.id==='R20')&&R.RWL_RUBRIC.some(r=>r.id==='R21'),'rubric carries R20 and R21');
 console.log(pass+' passed, '+fail+' failed'); process.exit(fail?1:0);
