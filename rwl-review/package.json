@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node test/make_fixture.cjs && node test/engine.test.mjs && npm run test:merge && npm run test:cashcalc",
+    "test": "node test/make_fixture.cjs && node test/engine.test.mjs && npm run test:merge && npm run test:cashcalc && node test/fallback.test.cjs",
     "test:merge": "node test/make_template.cjs && node test/merge.test.cjs",
     "test:cashcalc": "node test/make_cashcalc.cjs && node test/cashcalc.test.cjs"
   },

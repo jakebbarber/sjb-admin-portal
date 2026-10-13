@@ -17,7 +17,9 @@ find_additional_modules = false
 rules = []
 
 [vars]
-MOCK_AI = "1"
+MOCK_AI = "1"                      # the workflow blanks this when an ANTHROPIC_API_KEY secret exists
+CLAUDE_MODEL = "claude-opus-5-5"
+CLAUDE_FALLBACK_MODEL = "claude-sonnet-5-5"   # the backup when the main model is down or overloaded
 
 # The demo's own database. The workflow creates "sjb-admin-demo" on the
 # account if it does not exist and fills in the id below before deploying.

@@ -80,7 +80,7 @@ export default {
       mail:(to,s,t)=>sendMail(env,to,s,t),log:(...a)=>console.log(...a),pbkdf2Iterations:PBKDF2_ITER,
       ai:env.AI?((system,user,opts)=>runAI(env,system,user,opts)):null,
       /* RWL Review: Claude via the API key; MOCK_AI=1 runs the sandbox without one */
-      claudeKey:env.ANTHROPIC_API_KEY||'',claudeModel:env.CLAUDE_MODEL||'',mockAI:!!env.MOCK_AI,
+      claudeKey:env.ANTHROPIC_API_KEY||'',claudeModel:env.CLAUDE_MODEL||'',claudeFallbackModel:env.CLAUDE_FALLBACK_MODEL||'',mockAI:!!env.MOCK_AI,
       fflate:globalThis.fflate||null,rwlAuthor:env.RWL_AUTHOR||''});
     /* one-time setup: only while no adviser login exists */
     if(url.pathname==='/api/setup'&&request.method==='POST'){

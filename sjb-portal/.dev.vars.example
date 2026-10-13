@@ -2,3 +2,4 @@ SECRET=sandbox-session-secret-not-for-production
 SETUP_CODE=sandbox
 MOCK_AI=1
 # To test against the real model: remove MOCK_AI and add ANTHROPIC_API_KEY=sk-ant-...
+# Optional: CLAUDE_MODEL=claude-opus-5-5 and CLAUDE_FALLBACK_MODEL=claude-sonnet-5-5 (the backup used when the main model is down or overloaded)

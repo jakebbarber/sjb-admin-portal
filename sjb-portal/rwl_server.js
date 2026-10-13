@@ -178,22 +178,43 @@ const EDITS_SCHEMA={type:'object',additionalProperties:false,required:['points',
 /* Messages API over fetch: this Worker is uploaded unbundled, so there is no
    npm package to import. Request shape follows the Anthropic SDK defaults
    (structured output, effort, cached system prompt, default fallbacks). */
-async function askClaude(deps,rb,system,user,schema){
-  if(!deps.claudeKey) throw new Error('ANTHROPIC_API_KEY is not set on this server (or set MOCK_AI=1 for the sandbox)');
+/* Two layers of backup, both within Claude:
+   - fallbacks:'default' (server side): if the main model declines a request,
+     Anthropic re-routes it to another Claude model.
+   - outage fallback (here): a rate limit, overload, server error or network
+     failure is retried once on the main model, then once on the backup model
+     (CLAUDE_FALLBACK_MODEL, default Sonnet). A 4xx that is our own mistake
+     (bad request, bad key) is not retried. The case history records which
+     model answered, so a check done by the backup is visible. */
+const RWL_FALLBACK_MODEL='claude-sonnet-5-5';
+const RETRY_STATUS=new Set([408,409,425,429,500,502,503,504,529]);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function claudeOnce(deps,rb,system,user,schema,model){
   const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{
       'content-type':'application/json','x-api-key':deps.claudeKey,'anthropic-version':'2023-06-01',
       'anthropic-beta':'server-side-fallback-2026-07-01'},
-    body:JSON.stringify({model:deps.claudeModel||RWL_MODEL,max_tokens:16000,fallbacks:'default',
+    body:JSON.stringify({model,max_tokens:16000,fallbacks:'default',
       output_config:{effort:'high',format:{type:'json_schema',schema}},
       system:rb.manual?[{type:'text',text:system},{type:'text',text:'SALES MANUAL — the network\'s current manual ('+rb.manualName+'). It is the authority behind the rubric; where the two differ, follow the manual and say so.\n\n'+rb.manual,cache_control:{type:'ephemeral'}}]
         :[{type:'text',text:system,cache_control:{type:'ephemeral'}}],
       messages:[{role:'user',content:user}]})});
   const r=await res.json().catch(()=>({}));
-  if(!res.ok) throw new Error((r.error&&r.error.message)||('Claude API error '+res.status));
+  if(!res.ok){ const e=new Error((r.error&&r.error.message)||('Claude API error '+res.status)); e.status=res.status; e.retryable=RETRY_STATUS.has(res.status); throw e; }
   if(r.stop_reason==='refusal') throw new Error('The model declined this request'+(r.stop_details&&r.stop_details.explanation?': '+r.stop_details.explanation:''));
   if(r.stop_reason==='max_tokens') throw new Error('The answer was cut off; the letter may be too long for one pass');
   const text=(r.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-  return {data:JSON.parse(text),usage:r.usage||null,model:r.model||''};
+  return {data:JSON.parse(text),usage:r.usage||null,model:r.model||model};
+}
+async function askClaude(deps,rb,system,user,schema){
+  if(!deps.claudeKey) throw new Error('ANTHROPIC_API_KEY is not set on this server (or set MOCK_AI=1 for the sandbox)');
+  const main=deps.claudeModel||RWL_MODEL, backup=deps.claudeFallbackModel||RWL_FALLBACK_MODEL;
+  const plan=[main,main].concat(backup&&backup!==main?[backup]:[]);
+  let last;
+  for(let i=0;i<plan.length;i++){
+    try{ const r=await claudeOnce(deps,rb,system,user,schema,plan[i]); if(i>0) r.fellBack=plan[i]!==main; return r; }
+    catch(e){ last=e; const transient=e.retryable||(!e.status&&!(e instanceof SyntaxError)); if(!transient) throw e; if(i<plan.length-1) await sleep(deps.retryWait!=null?deps.retryWait:1500); }
+  }
+  throw new Error('The reviewer could not be reached (main and backup model): '+(last&&last.message||'unknown error'));
 }
 
 /* sandbox mock: fixed, plausible answers keyed off words in the letter */
@@ -650,7 +671,7 @@ async function rwlHandle(x){
     c.findings={ready_to_submit:!all.some(f=>f.severity==='must'),summary:r.data.summary,findings:all,ai:r.data.findings.length,code:cc.checks.length,cashflow:cc.cashflow};
     c.checks=cc.checks; c.readability=cc.readability; c.score=scoreOf(all); c.overrides=[]; c.approval=null;
     c.status=c.findings.ready_to_submit?'checked-ready':'checked-issues';
-    touch(c); logEv(c,'pre-check run ('+r.model+'): '+r.data.findings.length+' reviewer finding(s) + '+cc.checks.length+' automatic check(s), score '+c.score);
+    touch(c); logEv(c,'pre-check run ('+r.model+(r.fellBack?', backup model':'')+'): '+r.data.findings.length+' reviewer finding(s) + '+cc.checks.length+' automatic check(s), score '+c.score);
     await store.put('rwlcases',c.id,c);
     return json({findings:c.findings,score:c.score,readability:c.readability,usage:r.usage});
   }
@@ -666,7 +687,7 @@ async function rwlHandle(x){
     c.email=email; c.plan=r.data; c.status='edits-proposed';
     c.returns=c.returns||[]; c.returns.push({at:new Date().toISOString(),points:(r.data.points||[]).map(p=>({n:p.n,rule:p.rule||'',summary:p.summary,new_rule:p.new_rule||''}))});
     c.result={dry:{applied:dry.applied.map(a=>a.k),skipped:dry.skipped.map(s=>({k:s.k,why:s.why}))}};
-    touch(c); logEv(c,'compliance points mapped ('+r.model+'): '+r.data.edits.length+' edit(s), '+dry.skipped.length+' could not be placed');
+    touch(c); logEv(c,'compliance points mapped ('+r.model+(r.fellBack?', backup model':'')+'): '+r.data.edits.length+' edit(s), '+dry.skipped.length+' could not be placed');
     await store.put('rwlcases',c.id,c);
     return json({plan:r.data,dry:c.result.dry,usage:r.usage});
   }
@@ -741,6 +762,6 @@ async function rwlHandle(x){
   return err(404,'Not found');
 }
 
-const SJB_RWL={rwlHandle,docxOpen,docxSave,docxParas,docxNumbered,docxRedline,RWL_RUBRIC,mockEdits,mockFindings,codeChecks,scoreOf,cashflowCheck,cashflowParas,figuresOf};
+const SJB_RWL={rwlHandle,docxOpen,docxSave,docxParas,docxNumbered,docxRedline,RWL_RUBRIC,mockEdits,mockFindings,codeChecks,scoreOf,cashflowCheck,cashflowParas,figuresOf,askClaude};
 if(typeof module!=='undefined'&&module.exports) module.exports=SJB_RWL;
 else globalThis.SJB_RWL=SJB_RWL;

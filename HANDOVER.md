@@ -171,7 +171,13 @@ Open question for Jake or Dion: what the real CashCalc export looks like (PDF re
 
 Jake wants to demo the Admin portal from a link, and agreed to set up the firm's Cloudflare account and link it to GitHub. Decided: **one repo, two Workers** on Jake's account, `sjb-admin-demo` (this branch, mocked AI, fictional data, its own empty database) and later `sjb-admin` (live, from `main`, after Blacktower approve). Ready on this branch: `sjb-portal/wrangler.demo.toml` and `.github/workflows/deploy-demo.yml`, which runs the tests, builds the worker with `build.js`, creates the demo database if missing, deploys, and sets the two secrets. It needs four repo secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `DEMO_SECRET`, `DEMO_SETUP_CODE`) and refuses to run without them. First visit after deploy: `https://sjb-admin-demo.<subdomain>.workers.dev/setup`.
 
-### What is still to do
+### Added 13 Oct (Jake): the API key and the backup model
+
+Jake: "link the API key from Claude to be the AI that runs this portal ... then we need a backup AI as well." Decided and built:
+
+- **The key** stays a Worker secret (`ANTHROPIC_API_KEY`), set from a GitHub secret by the demo workflow, which then switches `MOCK_AI` off. Blacktower's provider approval and the Anthropic DPA are still required before real letters.
+- **Backup, both within Claude.** Layer 1, already there: `fallbacks:'default'` re-routes a declined request server-side. Layer 2, new in `askClaude`: a rate limit, overload, 5xx or network failure is retried once on the main model, then once on `CLAUDE_FALLBACK_MODEL` (default `claude-sonnet-5-5`); our own 4xx mistakes are not retried. The case history says "backup model" when it answered. `rwl-review/test/fallback.test.cjs` (8 checks, fetch stubbed) covers it.
+- **Not a different provider as backup**, by recommendation: it would need its own Blacktower approval and DPA, the prompts and schemas are Claude's, and a silently weaker review is worse than "the reviewer is unavailable, try again shortly". The code checks C1 to C8 keep working without any model and the gate stays closed until a check has run.
 
 1. **Admin gating.** RWL Review is currently visible to every signed-in user. Decide with Dion whether it should be `isAdmin` only, or a new `role` on user records (small change in `/api/users` and a check in `rwl_server.js`).
 2. **Harness page.** Write `harness/rwltest.html` (built with `mkfull.js`) in the style of `txtest.html` to cover the engine and the screen inside the portal build, so the next change to the portal cannot silently break it. The engine itself is covered by `rwl-review/test/engine.test.mjs`.
