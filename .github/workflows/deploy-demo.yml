@@ -1,0 +1,66 @@
+# Deploys the DEMO portal (sjb-admin-demo, mocked AI, fictional data) to the
+# firm's Cloudflare account from GitHub, per the standing rule that nothing is
+# deployed from a laptop.
+#
+# One-time setup, in this repo's Settings → Secrets and variables → Actions:
+#   CLOUDFLARE_API_TOKEN   token made from the "Edit Cloudflare Workers" template, plus D1 → Edit
+#   CLOUDFLARE_ACCOUNT_ID  from the Workers & Pages overview page
+#   DEMO_SECRET            any long random string (signs the login cookies)
+#   DEMO_SETUP_CODE        the code typed at /setup to create the first login (e.g. a word only the team knows)
+# Then run it from the Actions tab (Run workflow), or push to the demo branch.
+name: Deploy demo portal
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/dion-angove-handover-5cxnw6]
+    paths: ['sjb-portal/**', 'rwl-review/**', '.github/workflows/deploy-demo.yml']
+
+concurrency: deploy-demo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Tests (engine, mail merge, cashflow)
+        working-directory: rwl-review
+        run: npm ci && npm test
+
+      - name: Build the worker
+        working-directory: sjb-portal
+        run: node build.js && node checkregex.js && node --check worker.js
+
+      - name: Refuse to run without the Cloudflare secrets
+        if: env.CLOUDFLARE_API_TOKEN == '' || env.CLOUDFLARE_ACCOUNT_ID == ''
+        run: echo "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are not set in the repo secrets" && exit 1
+
+      - name: Create the demo database if it is missing, and put its id in the config
+        working-directory: sjb-portal
+        run: |
+          W="../rwl-review/node_modules/.bin/wrangler"
+          ID=$($W d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const d=JSON.parse(s).find(x=>x.name==='sjb-admin-demo');console.log(d?d.uuid:'')})")
+          if [ -z "$ID" ]; then
+            $W d1 create sjb-admin-demo >/dev/null
+            ID=$($W d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{console.log(JSON.parse(s).find(x=>x.name==='sjb-admin-demo').uuid)})")
+          fi
+          [ -n "$ID" ] || { echo "could not find or create the sjb-admin-demo database"; exit 1; }
+          sed -i "s/__DEMO_D1_ID__/$ID/" wrangler.demo.toml
+          echo "database id set"
+
+      - name: Deploy
+        working-directory: sjb-portal
+        run: ../rwl-review/node_modules/.bin/wrangler deploy --config wrangler.demo.toml
+
+      - name: Set the two secrets the worker needs (idempotent)
+        working-directory: sjb-portal
+        run: |
+          W="../rwl-review/node_modules/.bin/wrangler"
+          printf '%s' "${{ secrets.DEMO_SECRET }}" | $W secret put SECRET --config wrangler.demo.toml
+          printf '%s' "${{ secrets.DEMO_SETUP_CODE }}" | $W secret put SETUP_CODE --config wrangler.demo.toml

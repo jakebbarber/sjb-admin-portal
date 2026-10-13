@@ -1,0 +1,27 @@
+# DEMO deployment of the SJB Portal (Adviser + Admin) on the firm's own
+# Cloudflare account. Fictional data only, Claude mocked (MOCK_AI=1), its own
+# empty database. Deployed by .github/workflows/deploy-demo.yml; nothing here
+# points at Dion's account or the live client database.
+#
+# The live config for later is wrangler.toml (needs its own database id,
+# secrets and the Workers AI binding, and Blacktower's approval first).
+
+name = "sjb-admin-demo"
+main = "worker.js"
+compatibility_date = "2026-08-22"
+workers_dev = true
+
+# Upload the file as it stands (see wrangler.toml for why).
+no_bundle = true
+find_additional_modules = false
+rules = []
+
+[vars]
+MOCK_AI = "1"
+
+# The demo's own database. The workflow creates "sjb-admin-demo" on the
+# account if it does not exist and fills in the id below before deploying.
+[[d1_databases]]
+binding = "DB"
+database_name = "sjb-admin-demo"
+database_id = "__DEMO_D1_ID__"

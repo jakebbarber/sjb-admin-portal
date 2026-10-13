@@ -167,6 +167,10 @@ Jake: "make sure the cashcalc is checked against the cashcalc summary in the RWL
 
 Open question for Jake or Dion: what the real CashCalc export looks like (PDF report, which sections). The figure extraction is written for ordinary prose and tables of amounts; a sample export (fictional client) would let the test fixture match it.
 
+### Prepared 13 Oct: the demo deployment (not yet run)
+
+Jake wants to demo the Admin portal from a link, and agreed to set up the firm's Cloudflare account and link it to GitHub. Decided: **one repo, two Workers** on Jake's account, `sjb-admin-demo` (this branch, mocked AI, fictional data, its own empty database) and later `sjb-admin` (live, from `main`, after Blacktower approve). Ready on this branch: `sjb-portal/wrangler.demo.toml` and `.github/workflows/deploy-demo.yml`, which runs the tests, builds the worker with `build.js`, creates the demo database if missing, deploys, and sets the two secrets. It needs four repo secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `DEMO_SECRET`, `DEMO_SETUP_CODE`) and refuses to run without them. First visit after deploy: `https://sjb-admin-demo.<subdomain>.workers.dev/setup`.
+
 ### What is still to do
 
 1. **Admin gating.** RWL Review is currently visible to every signed-in user. Decide with Dion whether it should be `isAdmin` only, or a new `role` on user records (small change in `/api/users` and a check in `rwl_server.js`).
