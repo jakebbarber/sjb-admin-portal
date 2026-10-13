@@ -12,6 +12,7 @@
    mail:  async (to, subject, text) => void    (optional)
    ========================================================================= */
 const SHARED=(typeof module!=='undefined'&&typeof require==='function')?require('./public/shared.js'):globalThis.SJB_SHARED;
+const RWL=(typeof module!=='undefined'&&typeof require==='function')?require('../rwl_server.js'):globalThis.SJB_RWL;
 
 const enc=new TextEncoder(), dec=new TextDecoder();
 const b64u=bytes=>{ let s=''; for(const b of bytes) s+=String.fromCharCode(b);
@@ -491,6 +492,8 @@ function createApp(deps){
       if(!user) return err(401,'Please sign in.');
 
       if(path==='/api/me'&&method==='GET') return json({user:{id:user.id,email:user.email,name:user.name||'',phone:user.phone||'',admin:await isAdmin(user)}});
+      /* ---- Admin area: RWL Review (rwl_server.js) ---- */
+      if(path.indexOf('/api/rwl')===0&&RWL){ const r=await RWL.rwlHandle({req,path,method,user,store,deps,json,err,readJson,newId}); if(r) return r; }
       if(path==='/api/state'&&method==='GET') return json(await fullState(user));
       if(path==='/api/state'&&method==='PUT'){
         const body=await readJson(req);

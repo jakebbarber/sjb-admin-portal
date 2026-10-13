@@ -34,7 +34,8 @@ const RWL_RUBRIC=[
   {id:'R12',section:'Scope and shortfalls',severity:'should',rule:'Where advice is limited at the client request, the limitation and any resulting shortfalls in other areas must be recorded.'},
   {id:'R13',section:'Consistency',severity:'must',rule:'Figures, dates, names, currencies and objectives must be consistent across the letter (fact find summary, cashflow, recommendation, charges). Any contradiction is a finding.'},
   {id:'R14',section:'Plain language',severity:'should',rule:'Statements must be evidenced from the fact find or cashflow, free of marketing language, and must not overstate benefits or certainty.'},
-  {id:'R15',section:'Four Eyes',severity:'should',rule:'The letter must be ready for a second-person approval: no placeholders, template text or unresolved highlights left in.'}
+  {id:'R15',section:'Four Eyes',severity:'should',rule:'The letter must be ready for a second-person approval: no placeholders, template text or unresolved highlights left in.'},
+  {id:'R16',section:'Cashflow matches the report',severity:'must',rule:'Where the cashflow (CashCalc) report is attached, the letter\'s cashflow summary must match it exactly: the same income, expenditure, growth, inflation and retirement-age assumptions, the same figures, the same scenarios compared (for example with and without the transfer), and the same conclusion (on track, or a shortfall and from which year). The letter must not state a figure, assumption or conclusion the report does not show, and must not leave out a shortfall or a failing scenario the report does show.'}
 ];
 const rubricText=()=>RWL_RUBRIC.map(r=>r.id+' ['+r.section+'] ('+r.severity+'): '+r.rule).join('\n');
 
@@ -198,15 +199,16 @@ async function askClaude(deps,rb,system,user,schema){
 /* sandbox mock: fixed, plausible answers keyed off words in the letter */
 const findPara=(letter,needle)=>{ const m=letter.split('\n').find(l=>l.toLowerCase().includes(needle.toLowerCase())); return m?parseInt(m.slice(1),10):null; };
 const anchorOf=(letter,n)=>{ const l=letter.split('\n').find(x=>x.startsWith('['+n+']'))||''; return l.replace(/^\[\d+\]\s*(\{[^}]*\}\s*)?/,'').slice(0,60); };
-function mockFindings(letter){
+function mockFindings(letter,report){
   const perf=findPara(letter,'better performance'), cash=findPara(letter,'cashflow');
+  const r16=report&&/shortfall/i.test(report)&&!/shortfall/i.test(letter)?[{rule:'R16',severity:'must',paragraph:findPara(letter,'sufficient')||cash,issue:'The letter says the forecast meets the retirement income target in every year, but the CashCalc report shows a shortfall.',fix:'Say what the report shows: in which scenario and from which year the shortfall appears, and what it means for the recommendation.',quote:anchorOf(letter,findPara(letter,'sufficient')||cash),manual_ref:'R16 · cashflow summary must match the report (sandbox mock)'}]:[];
   return {ready_to_submit:false,
     summary:'Sandbox mock. The letter leans on the cashflow and on performance rather than on the client objectives; tax residence on withdrawal and the fee/servicing wording need attention.',
     findings:[
       {rule:'R7',severity:'must',paragraph:perf,issue:'A bullet gives better performance as a reason for the transfer.',fix:'Remove the bullet; performance cannot be evidenced or guaranteed.',quote:'Better Performance',manual_ref:'R7 · Sales Manual 13.5: past performance is not a basis for a recommendation'},
       {rule:'R2',severity:'must',paragraph:cash,issue:'The cashflow shows the objective is met either way, but the letter presents it as supporting the transfer.',fix:'State plainly that the recommendation does not rest on retirement income need, and give the real reasons.',quote:anchorOf(letter,cash),manual_ref:'R2 · RWL must explain why the recommendation meets the objectives'},
       {rule:'R5',severity:'must',paragraph:null,issue:'Current country of tax residence and the tax position on withdrawal are not stated.',fix:'Add a paragraph on current residence, withdrawal taxation and the need for local tax advice.',quote:'',manual_ref:'R5 · cross-border tax disclosure; R6 · Sales Manual 13.5 tax caveat'},
-      {rule:'R10',severity:'should',paragraph:findPara(letter,'reduced fee'),issue:'Reduced fee stated without confirming the service is unchanged.',fix:'Add that the full servicing proposition continues.',quote:'we have agreed to apply a reduced fee structure',manual_ref:'R10 · servicing proposition'}]};
+      {rule:'R10',severity:'should',paragraph:findPara(letter,'reduced fee'),issue:'Reduced fee stated without confirming the service is unchanged.',fix:'Add that the full servicing proposition continues.',quote:'we have agreed to apply a reduced fee structure',manual_ref:'R10 · servicing proposition'}].concat(r16)};
 }
 function mockEdits(letter){
   const perf=findPara(letter,'better performance'), cash=findPara(letter,'cashflow'), fee=findPara(letter,'reduced fee');
@@ -218,9 +220,10 @@ function mockEdits(letter){
     edits,reply:'Thank you for the review. Point 1: a new paragraph on the key assumptions now follows the cashflow summary. Point 2: the performance bullet has been removed. Point 3: the fee paragraph now confirms the full servicing proposition continues. (Sandbox mock reply.)',
     needs_adviser:['[confirm current country of tax residence]']};
 }
-async function rwlPrecheck(deps,rb,letter){
-  if(deps.mockAI) return {data:mockFindings(letter),usage:null,model:'mock'};
-  return askClaude(deps,rb,SYSTEM_PRECHECK(rb),'Review the following Reason Why Letter against the rubric. Paragraphs are numbered [n].\n\n<letter>\n'+letter+'\n</letter>',FINDINGS_SCHEMA);
+async function rwlPrecheck(deps,rb,letter,report){
+  if(deps.mockAI) return {data:mockFindings(letter,report),usage:null,model:'mock'};
+  const rep=report?'\n\nThe adviser\'s cashflow (CashCalc) report for this client is attached below. Rule R16 applies: compare the letter\'s cashflow summary with it line by line (assumptions, figures, scenarios, conclusion) and raise a finding for every difference and every omission, quoting the letter and naming what the report shows instead.\n\n<cashflow_report>\n'+report+'\n</cashflow_report>':'';
+  return askClaude(deps,rb,SYSTEM_PRECHECK(rb),'Review the following Reason Why Letter against the rubric. Paragraphs are numbered [n].\n\n<letter>\n'+letter+'\n</letter>'+rep,FINDINGS_SCHEMA);
 }
 async function rwlPlan(deps,rb,letter,email){
   if(deps.mockAI) return {data:mockEdits(letter),usage:null,model:'mock'};
@@ -267,7 +270,44 @@ function codeChecks(letter,opts){
   if(long.length) F('C6','should',long[0].n,long.length+' sentence'+(long.length===1?'':'s')+' run'+(long.length===1?'s':'')+' past 55 words (the longest is '+Math.max(...long.map(l=>l.w))+').','Split them. Consumer Duty asks for letters a client can follow at first reading.',long[0].x.slice(0,120));
   /* C7 template drift */
   if(opts&&opts.template&&opts.template.status!=='aligned') F('C7','should',null,'Built from the template "'+opts.template.name+'", which has not been aligned with the manual.','Align the template in RWL Templates so the next letter starts clean.','');
-  return {checks:out,readability:{avgSentence:sents?Math.round(words/sents):0,longSentences:long.length,sentences:sents}};
+  /* C8 cashflow summary against the CashCalc report */
+  const cf=cashflowCheck(letter,opts&&opts.report); cf.findings.forEach(f=>out.push(f));
+  return {checks:out,readability:{avgSentence:sents?Math.round(words/sents):0,longSentences:long.length,sentences:sents},cashflow:{paras:cf.paras,compared:cf.compared,missing:cf.missing,attached:!!(opts&&opts.report)}};
+}
+/* C8 cashflow reconciliation: every figure in the letter's cashflow summary
+   must appear in the attached CashCalc report. Pure code: money, percentages,
+   ages and years are pulled out of both and compared as numbers, so a summary
+   that says EUR 90,000 when the report says EUR 85,000 is caught before
+   Compliance catches it. The reviewer (R16) then reads both for assumptions,
+   scenarios and the conclusion, which no regex can do. */
+const paraStyled=letter=>letter.split('\n').map(l=>{ const m=/^\[(\d+)\](?:\s*\{([^}]*)\})?\s*(.*)$/.exec(l); return m?{n:+m[1],style:m[2]||'',text:m[3]}:null; }).filter(Boolean);
+const CASHFLOW_WORDS=/cash\s*flow|cashcalc|forecast|projection|on track|shortfall/i;
+function cashflowParas(letter){
+  const P=paraStyled(letter); const out=[]; let inSection=false;
+  P.forEach(p=>{ const heading=/^Heading/i.test(p.style)||(p.text.length<70&&!/[.!?]$/.test(p.text)&&/cash\s*flow|forecast/i.test(p.text));
+    if(heading) inSection=/cash\s*flow|cashcalc|forecast|projection/i.test(p.text);
+    else if(inSection||CASHFLOW_WORDS.test(p.text)) out.push(p); });
+  return out;
+}
+const numNorm=s=>{ let t=String(s).replace(/[,\s]/g,'').toLowerCase(); let k=1; if(/k$/.test(t)){ k=1000; t=t.slice(0,-1); } if(/m$/.test(t)){ k=1000000; t=t.slice(0,-1); } const v=parseFloat(t); return isNaN(v)?null:Math.round(v*k*100)/100; };
+function figuresOf(text){
+  const out=[]; const seen=new Set(); const add=(kind,raw,v)=>{ if(v==null) return; const key=kind+':'+v; if(seen.has(key)) return; seen.add(key); out.push({kind,raw,v}); };
+  const t=String(text).replace(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,' ');            /* dates are C3's business */
+  let m; const money=/(?:£|€|\$|\b(?:GBP|EUR|USD|CHF)\b)\s?(\d[\d,]*(?:\.\d+)?\s?[km]?)\b|\b(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\b/gi;
+  while((m=money.exec(t))) add('amount',m[0].trim(),numNorm(m[1]||m[2]));
+  const pct=/(\d+(?:\.\d+)?)\s?%/g; while((m=pct.exec(t))) add('percent',m[0],numNorm(m[1]));
+  const age=/\b(?:age|aged|at|until|to|from)\s+(\d{2})\b(?!\s?%)/gi; while((m=age.exec(t))){ const v=+m[1]; if(v>=40&&v<=100) add('age',m[0],v); }
+  const yr=/\b(20[2-9]\d)\b/g; while((m=yr.exec(t))) add('year',m[0],+m[1]);
+  return out;
+}
+function cashflowCheck(letter,report){
+  const paras=cashflowParas(letter); if(!paras.length) return {findings:[],compared:0,missing:[],paras:0};
+  if(!report) return {findings:[{rule:'C8',severity:'should',paragraph:paras[0].n,issue:'The letter has a cashflow summary but no CashCalc report is attached, so its figures could not be reconciled.',fix:'Attach the CashCalc report to this case and run the check again. A summary that does not match the report is one of the commonest bounce-backs.',quote:paras[0].text.slice(0,120),manual_ref:'Automatic check · R16'}],compared:0,missing:[],paras:paras.length};
+  const have=new Set(figuresOf(report).map(f=>f.kind+':'+f.v)); const haveLoose=new Set(figuresOf(report).map(f=>f.v));
+  const missing=[]; let compared=0;
+  paras.forEach(p=>figuresOf(p.text).forEach(f=>{ compared++; if(!have.has(f.kind+':'+f.v)&&!(f.kind!=='percent'&&haveLoose.has(f.v))) missing.push({...f,n:p.n}); }));
+  const findings=missing.map(x=>({rule:'C8',severity:'must',paragraph:x.n,issue:'The cashflow summary gives '+x.raw+', which is not in the CashCalc report.',fix:'Make the letter say what the report says, or re-run the report. Every figure in the cashflow summary must come from the attached report.',quote:x.raw,manual_ref:'Automatic check · R16'}));
+  return {findings,compared,missing:missing.map(x=>x.raw),paras:paras.length};
 }
 const scoreOf=findings=>{ const m=findings.filter(f=>f.severity==='must').length, sh=findings.length-m; return Math.max(0,100-15*m-5*sh); };
 async function sha256(text){ const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)); return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(''); }
@@ -310,7 +350,8 @@ async function textWrite(store,key,text){
 }
 async function textRead(store,key,n){ let t=''; for(let i=0;i<n;i++){ const c=await store.get('rwltext',key+'.'+i); t+=c?c.d:''; } return t; }
 async function textDelete(store,key,n){ for(let i=0;i<n;i++) await store.del('rwltext',key+'.'+i); }
-const MANUAL_MAX=400000;   /* characters sent to the reviewer; a 40-page manual is ~120k */
+const MANUAL_MAX=400000;
+const REPORT_MAX=150000;   /* characters of the CashCalc report sent with a review */   /* characters sent to the reviewer; a 40-page manual is ~120k */
 async function loadRules(store){
   const meta=await store.get('rwlmanual','main');
   const rr=await store.get('rwlrubric','main');
@@ -506,7 +547,7 @@ async function rwlHandle(x){
 
   if(path==='/api/rwl/insights'&&method==='GET'){
     const cases=await store.list('rwlcases'); const rb=await loadRules(store);
-    const CNAMES={C1:'Automatic: names agree',C2:'Automatic: fees agree',C3:'Automatic: dates',C4:'Automatic: currencies',C5:'Automatic: template residue',C6:'Automatic: readability',C7:'Automatic: template drift'};
+    const CNAMES={C1:'Automatic: names agree',C2:'Automatic: fees agree',C3:'Automatic: dates',C4:'Automatic: currencies',C5:'Automatic: template residue',C6:'Automatic: readability',C7:'Automatic: template drift',C8:'Automatic: cashflow figures match the report'};
     const ruleName=id=>{ const r=rb.rubric.find(x=>x.id===id); return r?r.section:(CNAMES[id]||(id==='NEW'?'Not in the checklist':id)); };
     const byStatus={}; cases.forEach(c=>{ byStatus[c.status]=(byStatus[c.status]||0)+1; });
     const submitted=cases.filter(c=>(c.submissions||[]).length||(c.returns||[]).length).length;
@@ -569,15 +610,44 @@ async function rwlHandle(x){
   if(!action&&method==='GET'){ const {letter,...rest}=c; return json(rest); }
   if(!action&&method==='DELETE'){
     await fileDelete(store,c.id,'original'); await fileDelete(store,c.id,'redlined');
+    if(c.cashcalc) await textDelete(store,'cc.'+c.id,c.cashcalc.chunks);
     await store.del('rwlcases',c.id);
+    return json({ok:true});
+  }
+  /* the CashCalc report: a PDF is read in the browser (only its text comes
+     here), a Word file is read here. Stored as text chunks beside the case. */
+  if(action==='cashcalc'&&method==='POST'){
+    let form; try{ form=await req.formData(); }catch(e){ return err(400,'Send the report as a form upload.'); }
+    const file=form.get('file'); let text=String(form.get('text')||''); let name=String(form.get('name')||'').slice(0,140);
+    if(file&&typeof file!=='string'){
+      if(file.size>8*1024*1024) return err(400,'Files up to 8 MB please.');
+      name=name||String(file.name||'').slice(0,140);
+      const bytes=new Uint8Array(await file.arrayBuffer());
+      if(/\.docx$/i.test(file.name||'')){ if(!deps.fflate) return err(501,'Word support is not available on this server.'); try{ text=docxParas(docxOpen(deps.fflate,bytes).xml).map(p=>p.text).join('\n'); }catch(e){ return err(400,'Could not read that file: '+e.message); } }
+      else if(/\.(txt|csv)$/i.test(file.name||'')) text=new TextDecoder().decode(bytes);
+      else return err(400,'Upload the CashCalc report as a PDF, a Word .docx or a text file.');
+    }
+    text=text.replace(/\r/g,'').trim();
+    if(text.length<200) return err(400,'That report has almost no text in it. If it is a scanned PDF, export it again from CashCalc.');
+    if(c.cashcalc) await textDelete(store,'cc.'+c.id,c.cashcalc.chunks);
+    const chunks=await textWrite(store,'cc.'+c.id,text);
+    c.cashcalc={name:name||'CashCalc report',chars:text.length,chunks,at:new Date().toISOString(),by:who,figures:figuresOf(text).length};
+    if(c.findings){ c.findings=null; c.score=null; c.checks=null; c.approval=null; c.overrides=[]; if(c.status==='checked-ready'||c.status==='checked-issues'||c.status==='approved') c.status='uploaded'; }
+    touch(c); logEv(c,'CashCalc report attached: '+c.cashcalc.name+' ('+Math.round(text.length/1000)+'k characters, '+c.cashcalc.figures+' figures)');
+    await store.put('rwlcases',c.id,c);
+    return json({cashcalc:c.cashcalc});
+  }
+  if(action==='cashcalc'&&method==='DELETE'){
+    if(c.cashcalc){ await textDelete(store,'cc.'+c.id,c.cashcalc.chunks); c.cashcalc=null; touch(c); logEv(c,'CashCalc report removed'); await store.put('rwlcases',c.id,c); }
     return json({ok:true});
   }
   if(action==='precheck'&&method==='POST'){
     const rb=await loadRules(store);
-    let r; try{ r=await rwlPrecheck(deps,rb,c.letter); }catch(e){ return err(502,e.message||'The reviewer could not be reached.'); }
-    const cc=codeChecks(c.letter,{template:c.template});
+    const report=c.cashcalc?await textRead(store,'cc.'+c.id,c.cashcalc.chunks):'';
+    let r; try{ r=await rwlPrecheck(deps,rb,c.letter,report.slice(0,REPORT_MAX)); }catch(e){ return err(502,e.message||'The reviewer could not be reached.'); }
+    const cc=codeChecks(c.letter,{template:c.template,report});
     const all=r.data.findings.concat(cc.checks);
-    c.findings={ready_to_submit:!all.some(f=>f.severity==='must'),summary:r.data.summary,findings:all,ai:r.data.findings.length,code:cc.checks.length};
+    c.findings={ready_to_submit:!all.some(f=>f.severity==='must'),summary:r.data.summary,findings:all,ai:r.data.findings.length,code:cc.checks.length,cashflow:cc.cashflow};
     c.checks=cc.checks; c.readability=cc.readability; c.score=scoreOf(all); c.overrides=[]; c.approval=null;
     c.status=c.findings.ready_to_submit?'checked-ready':'checked-issues';
     touch(c); logEv(c,'pre-check run ('+r.model+'): '+r.data.findings.length+' reviewer finding(s) + '+cc.checks.length+' automatic check(s), score '+c.score);
@@ -671,6 +741,6 @@ async function rwlHandle(x){
   return err(404,'Not found');
 }
 
-const SJB_RWL={rwlHandle,docxOpen,docxSave,docxParas,docxNumbered,docxRedline,RWL_RUBRIC,mockEdits,mockFindings,codeChecks,scoreOf};
+const SJB_RWL={rwlHandle,docxOpen,docxSave,docxParas,docxNumbered,docxRedline,RWL_RUBRIC,mockEdits,mockFindings,codeChecks,scoreOf,cashflowCheck,cashflowParas,figuresOf};
 if(typeof module!=='undefined'&&module.exports) module.exports=SJB_RWL;
 else globalThis.SJB_RWL=SJB_RWL;

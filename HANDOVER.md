@@ -155,6 +155,18 @@ Known limits: field codes inside headers, footers and text boxes are untouched b
 
 Still open from the list of improvements: the Fact Find cross-check (objectives, risk, residence and vulnerability flags from the Adviser portal record), Consumer Duty rewrites beyond the sentence-length check, email-in and pack-out, an evaluation set built from real bounce-backs, and the production hardening (Access, roles, retention, DPA).
 
+### Added 13 Oct (Jake's session): the CashCalc reconciliation, and a Node build
+
+Jake: "make sure the cashcalc is checked against the cashcalc summary in the RWL also, to make sure it matches, as that's often one of the problems with the compliance checks." Built and sandbox-tested:
+
+- **The CashCalc report is attached to the case** (card "1b" on the case screen, `POST/DELETE /api/rwl/cases/:id/cashcalc`). A PDF is read in the browser with the portal's own `pdfRead` (as the Sales Manual is) and only the text is sent; a Word export is read on the server. The text is stored in chunks (`rwltext`, key `cc.<caseId>`), and attaching a report resets any earlier check so it must be re-run.
+- **C8, in code:** `cashflowCheck(letter, report)` picks the letter's cashflow summary (the paragraphs under a cashflow or forecast heading, plus any paragraph that cites the cashflow), pulls out every figure (money, percentages, ages, years; dates are left to C3) and checks each one appears in the report. A figure that does not is a "must" finding naming it; no report attached when the letter has a cashflow summary is a "should" finding. The card shows "Figures reconcile" or the missing figures.
+- **R16, by the reviewer:** a new rubric rule; the report goes to Claude with the letter and the prompt asks for a finding on every difference in assumptions, scenarios and the conclusion (for example a shortfall the letter does not mention). The sandbox mock raises it when the report says "shortfall" and the letter does not.
+- **Fixture and tests:** `rwl-review/test/make_cashcalc.cjs` builds `fixture-cashcalc.docx` (fictional; it deliberately disagrees with the fixture letter: income 85,000 not 90,000, and a shortfall from 2049 without the transfer). `cashcalc.test.cjs` runs 18 checks; `npm test` now runs engine, merge and cashcalc tests (12 + 11 + 18, all green). The Word engine is untouched.
+- **`sjb-portal/build.js`:** the same build as `build_server.ps1` + `build_worker.ps1` in Node, for Linux (GitHub Actions, cloud Claude Code sessions). Verified byte-identical to the PowerShell output apart from the build stamp. Run `node build.js` then `node checkregex.js`.
+
+Open question for Jake or Dion: what the real CashCalc export looks like (PDF report, which sections). The figure extraction is written for ordinary prose and tables of amounts; a sample export (fictional client) would let the test fixture match it.
+
 ### What is still to do
 
 1. **Admin gating.** RWL Review is currently visible to every signed-in user. Decide with Dion whether it should be `isAdmin` only, or a new `role` on user records (small change in `/api/users` and a check in `rwl_server.js`).

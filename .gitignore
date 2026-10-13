@@ -2,3 +2,5 @@ node_modules/
 .wrangler/
 .dev.vars
 *.log
+sjb-portal/server/public/
+sjb-portal/sjb-factfind.html

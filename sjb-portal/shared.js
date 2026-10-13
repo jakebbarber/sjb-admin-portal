@@ -20,7 +20,7 @@ const CURRENCIES=['GBP','EUR','USD','CHF','AUD','CAD','SEK','NOK','SGD','AED','Z
 /* -------------------------------- utils --------------------------------- */
 /* Stamped by the build script. Shown in the rail so it is obvious at a
    glance whether the browser is running the copy that was deployed. */
-const BUILD='2026-10-12 16:06';
+const BUILD='2026-10-13 09:38';
 const $=(s,r)=>(r||document).querySelector(s);
 const $$=(s,r)=>Array.from((r||document).querySelectorAll(s));
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

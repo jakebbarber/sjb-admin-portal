@@ -13,7 +13,7 @@
    screen. It registers itself with the Admin portal (wadm) and adds its
    actions to ACT like every other part.
    ========================================================================= */
-const RWL={view:'list',cases:[],cur:null,file:null,email:'',busy:'',info:null,loaded:false,templates:[],btRef:''};
+const RWL={view:'list',cases:[],cur:null,file:null,ccFile:null,email:'',busy:'',info:null,loaded:false,templates:[],btRef:''};
 const RWL_STATUS={uploaded:['Uploaded','info'],'checked-ready':['Checked · ready','ok'],'checked-issues':['Checked · issues found','warn'],
   approved:['Approved','ok'],submitted:['Sent to Blacktower','info'],'edits-proposed':['Returned · changes proposed','or'],redlined:['Redlined','ok'],
   resubmitted:['Resubmitted','info'],closed:['Closed','mut']};
@@ -43,6 +43,7 @@ async function rwlLoad(){
 }
 async function rwlOpenCase(id){
   const c=await rwlApi('GET','/api/rwl/cases/'+encodeURIComponent(id));
+  if(!RWL.cur||RWL.cur.id!==c.id) RWL.ccFile=null;
   RWL.cur=c; RWL.email=c.email||''; RWL.view='case'; rwlSetInfo();
 }
 /* where a case sits on the journey, for the strip at the top of the case */
@@ -183,6 +184,26 @@ function rwlStripHTML(c){
   const at=rwlStage(c);
   return '<div class="row" style="gap:0;flex-wrap:wrap;margin-bottom:16px">'+RWL_STEPS.map((s,i)=>'<span class="bdg '+(i<at?'ok':i===at?'or':'mut')+'" style="border-radius:0;'+(i===0?'border-radius:20px 0 0 20px;':'')+(i===RWL_STEPS.length-1?'border-radius:0 20px 20px 0;':'')+'">'+(i<at?ic('check',11)+' ':'')+esc(s[1])+'</span>').join('')+'</div>';
 }
+/* the CashCalc report: attached to the case so the pre-check can reconcile
+   the letter's cashflow summary with it (C8 in code, R16 by the reviewer) */
+function rwlCashcalcHTML(c){
+  const cc=c.cashcalc, f=RWL.ccFile, cf=c.findings&&c.findings.cashflow;
+  let h='<div class="card" style="margin-bottom:16px"><div class="card-h"><span class="av s or">1b</span><div><h3>The CashCalc report</h3>'
+    +'<div class="sub">Attach the cashflow report the letter summarises. The check then reconciles every figure in the cashflow summary with it, and the reviewer compares the assumptions, scenarios and conclusion.</div></div></div><div class="card-b">';
+  if(cc){
+    h+='<div class="row" style="gap:10px;flex-wrap:wrap"><span class="bdg ok">'+ic('check',11)+' '+esc(cc.name)+'</span><span class="tiny muted">'+Math.round(cc.chars/1000)+'k characters · '+cc.figures+' figures · attached '+esc(rwlWhen(cc.at))+' by '+esc(cc.by||'')+'</span>'
+      +'<button class="btn ghost sm" data-a="rwlCcRemove"'+(RWL.busy?' disabled':'')+'>Remove</button></div>';
+    if(cf&&cf.attached) h+='<div class="note '+(cf.missing.length?'warn':'ok')+'" style="margin-top:10px"><span class="ic">'+ic(cf.missing.length?'alert':'check',15)+'</span><div>'+(cf.missing.length?'<b>'+cf.missing.length+' figure'+(cf.missing.length===1?'':'s')+' in the cashflow summary '+(cf.missing.length===1?'is':'are')+' not in the report:</b> '+esc(cf.missing.join(', '))+'.':'<b>Figures reconcile.</b> All '+cf.compared+' figures in the cashflow summary are in the report.')+'</div></div>';
+    else if(c.findings) h+='<div class="hint" style="margin-top:8px">Run the check again to reconcile the letter with this report.</div>';
+  } else {
+    h+='<div id="rwlCcDrop" class="empty" style="border:2px dashed var(--line);border-radius:12px;padding:18px;cursor:pointer'+(f?';border-color:var(--ok)':'')+'"><div class="ei">'+ic(f?'check':'up',20)+'</div>'
+      +(f?'<h4>'+esc(f.name)+'</h4><p>'+Math.round(f.size/1024)+' KB · click to choose a different file</p>':'<h4>Drop the CashCalc report here</h4><p>PDF or Word export from CashCalc, or click to choose it. A PDF is read in your browser; only its text is sent.</p>')
+      +'</div><input type="file" id="rwlCcFile" accept=".pdf,.docx,.txt" style="display:none">'
+      +'<div class="row" style="margin-top:12px;gap:8px"><button class="btn pri" data-a="rwlCcUpload"'+(f&&!RWL.busy?'':' disabled')+'>'+ic('up',15)+' Attach report</button>'
+      +(cf&&cf.paras&&!cf.attached?'<span class="tiny muted">The letter has a cashflow summary ('+cf.paras+' paragraph'+(cf.paras===1?'':'s')+'); without the report its figures cannot be reconciled.</span>':'')+'</div>';
+  }
+  return h+'</div></div>';
+}
 function rwlCaseHTML(){
   const c=RWL.cur;
   let h='<div class="ph"><div><h1>'+esc(c.ref)+'</h1><div class="sub">'+(c.adviser?esc(c.adviser)+' · ':'')+(c.template?'from '+esc(c.template.name)+' · ':'')+esc(c.originalName||'')+' · '+rwlBadge(c.status)+' '+rwlScore(c.score)+'</div></div>'
@@ -190,9 +211,10 @@ function rwlCaseHTML(){
     +'<a class="btn" href="/api/rwl/cases/'+esc(c.id)+'/download?which=original" download>'+ic('dl',15)+' Original</a>'
     +'<a class="btn" href="/api/rwl/cases/'+esc(c.id)+'/audit" download title="Every action on this case, with who and when">'+ic('clip',15)+' Audit log</a>'
     +'<button class="btn danger" data-a="rwlDelete">'+ic('trash',15)+' Delete</button></div></div>'+rwlStripHTML(c)+rwlInfo();
+  h+=rwlCashcalcHTML(c);
   /* step 2: pre-check */
   h+='<div class="card"><div class="card-h"><span class="av s or">2</span><div><h3>Check against the Blacktower manual</h3>'
-    +'<div class="sub">The reviewer reads the letter against the manual and the checklist; the automatic checks reconcile names, fees, dates, currencies, template residue and readability.</div></div>'
+    +'<div class="sub">The reviewer reads the letter against the manual and the checklist; the automatic checks reconcile names, fees, dates, currencies, template residue, readability, and the cashflow summary against the CashCalc report.</div></div>'
     +'<button class="btn sp" data-a="rwlPrecheck"'+(RWL.busy?' disabled':'')+'>'+ic('shield',15)+(c.findings?' Run the check again':' Run the check')+'</button></div>'
     +'<div class="card-b">'+(RWL.busy==='check'?rwlBusy():'')
     +(c.findings?'<div class="row" style="gap:14px;flex-wrap:wrap"><div><span class="tiny muted">Score</span><div style="font-size:30px;font-weight:800;line-height:1;color:var(--'+(c.score>=80?'ok':c.score>=50?'warn':'risk')+')">'+c.score+'<span class="small muted">/100</span></div></div>'
@@ -244,6 +266,22 @@ Object.assign(ACT,{
       toast('Letter uploaded',r.paragraphs+' paragraphs read.');
     });
   },
+  rwlCcUpload(){
+    if(!RWL.ccFile){ rwlSetInfo('warn','Choose the CashCalc report first.'); render(); return; }
+    rwlRun('attach',async()=>{
+      const fd=new FormData(); fd.append('name',RWL.ccFile.name);
+      if(/\.pdf$/i.test(RWL.ccFile.name)){
+        /* read the PDF here with the portal's own reader (as the Sales Manual does); only the text goes to the server */
+        const d=await pdfRead(new Uint8Array(await RWL.ccFile.arrayBuffer()));
+        if(d.scanned||!d.lines.length) throw new Error('That PDF is a scan (pictures of pages), so its text cannot be read. Export the report from CashCalc again as a PDF with text.');
+        fd.append('text',unwrapLines(d.lines).join('\n'));
+      } else fd.append('file',RWL.ccFile);
+      const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/cashcalc',null,fd);
+      RWL.ccFile=null; await rwlOpenCase(RWL.cur.id);
+      toast('Report attached',r.cashcalc.figures+' figures read. Run the check to reconcile the letter with it.');
+    });
+  },
+  rwlCcRemove(){ rwlRun('remove',async()=>{ await rwlApi('DELETE','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/cashcalc'); await rwlOpenCase(RWL.cur.id); }); },
   rwlPrecheck(){ rwlRun('check',async()=>{
     const r=await rwlApi('POST','/api/rwl/cases/'+encodeURIComponent(RWL.cur.id)+'/precheck');
     await rwlOpenCase(RWL.cur.id);
@@ -281,10 +319,11 @@ Object.assign(ACT,{
   rwlCopy(){ const t=$('#rwlReply'); if(!t) return; navigator.clipboard.writeText(t.value).then(()=>toast('Copied','The reply is on your clipboard.')); }
 });
 /* file picking: the drop zone and the hidden input, delegated like everything else */
-document.addEventListener('click',e=>{ const z=e.target.closest('#rwlDrop'); if(z){ const i=$('#rwlFile'); if(i) i.click(); } });
-document.addEventListener('change',e=>{ if(e.target&&e.target.id==='rwlFile'&&e.target.files[0]){ rwlPick(e.target.files[0]); } if(e.target&&e.target.id==='rwlTemplate') RWL.templateId=e.target.value; });
-document.addEventListener('dragover',e=>{ if(e.target.closest&&e.target.closest('#rwlDrop')) e.preventDefault(); });
-document.addEventListener('drop',e=>{ const z=e.target.closest&&e.target.closest('#rwlDrop'); if(z){ e.preventDefault(); if(e.dataTransfer.files[0]) rwlPick(e.dataTransfer.files[0]); } });
+document.addEventListener('click',e=>{ if(e.target.closest('#rwlDrop')){ const i=$('#rwlFile'); if(i) i.click(); } if(e.target.closest('#rwlCcDrop')){ const i=$('#rwlCcFile'); if(i) i.click(); } });
+document.addEventListener('change',e=>{ if(e.target&&e.target.id==='rwlFile'&&e.target.files[0]){ rwlPick(e.target.files[0]); } if(e.target&&e.target.id==='rwlCcFile'&&e.target.files[0]){ rwlCcPick(e.target.files[0]); } if(e.target&&e.target.id==='rwlTemplate') RWL.templateId=e.target.value; });
+document.addEventListener('dragover',e=>{ if(e.target.closest&&(e.target.closest('#rwlDrop')||e.target.closest('#rwlCcDrop'))) e.preventDefault(); });
+document.addEventListener('drop',e=>{ if(!e.target.closest) return; if(e.target.closest('#rwlDrop')){ e.preventDefault(); if(e.dataTransfer.files[0]) rwlPick(e.dataTransfer.files[0]); } else if(e.target.closest('#rwlCcDrop')){ e.preventDefault(); if(e.dataTransfer.files[0]) rwlCcPick(e.dataTransfer.files[0]); } });
+function rwlCcPick(f){ if(!/\.(pdf|docx|txt)$/i.test(f.name)){ rwlSetInfo('warn','Upload the CashCalc report as a PDF, a Word .docx or a text file.'); render(); return; } RWL.ccFile=f; rwlSetInfo(); render(); }
 document.addEventListener('input',e=>{ if(e.target&&e.target.id==='rwlEmail') RWL.email=e.target.value; if(e.target&&e.target.id==='rwlBtRef') RWL.btRef=e.target.value; });
 function rwlPick(f){
   RWL.ref=(($('#rwlRef')||{}).value||'').trim(); RWL.adviser=(($('#rwlAdviser')||{}).value||'').trim(); RWL.templateId=(($('#rwlTemplate')||{}).value||'');
